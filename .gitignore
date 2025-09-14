@@ -1,0 +1,61 @@
+# Environment variables and sensitive configuration
+.env
+.env.local
+.env.production
+.env.staging
+
+# Log files
+*.log
+logs/
+victron-*.log
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database credentials and connection strings
+database.config.js
+db-credentials.json
+
+# SSL certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+
+# Backup files
+*.backup
+*.bak
+*.sql.backup
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# API keys and secrets
+secrets.json
+api-keys.json
+mqtt-credentials.json
+
+# Production configuration
+production.config.js
+prod.env

@@ -1,0 +1,22 @@
+{
+  "name": "solar",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "victron.collection": "node ./src/victron.collection.js",
+    "victron.controller": "node ./src/victron.controller.js",
+    "delete.data": "node delete-all-data.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "mqtt": "^5.14.0",
+    "node-cron": "^4.2.1",
+    "pg": "^8.11.3"
+  }
+}
