@@ -64,20 +64,25 @@ async function loadTariffConfig() {
     for (const period of periodsResult.rows) {
       const setpoint = setpointsResult.rows.find(s => s.tariff_period === period.period_name);
       
+      console.log(`Processing period: ${period.period_name}, found setpoint:`, setpoint);
+      
       if (setpoint) {
         newTariff[period.period_name] = {
           importRate: parseFloat(period.import_rate_pence),
           exportRate: parseFloat(period.export_rate_pence),
           startTime: period.start_time,
           endTime: period.end_time,
-          gridSetpoint: setpoint ? parseInt(setpoint.grid_setpoint_watts) : 0,
-          minSOC: setpoint ? parseFloat(setpoint.min_soc_percent) : 10,
-          maxSOC: setpoint ? parseFloat(setpoint.max_soc_percent) : 100,
-          targetSOC: setpoint ? parseFloat(setpoint.target_soc_percent) : null,
-          essMode: setpoint ? parseInt(setpoint.ess_mode) : 3,
-          inverterMode: setpoint ? parseInt(setpoint.inverter_mode) : 3,
-          description: setpoint ? setpoint.description : `${period.period_name} period`
+          gridSetpoint: parseInt(setpoint.grid_setpoint_watts),
+          minSOC: parseFloat(setpoint.min_soc_percent),
+          maxSOC: parseFloat(setpoint.max_soc_percent),
+          targetSOC: setpoint.target_soc_percent ? parseFloat(setpoint.target_soc_percent) : null,
+          essMode: parseInt(setpoint.ess_mode),
+          inverterMode: parseInt(setpoint.inverter_mode),
+          description: setpoint.description
         };
+        console.log(`Created config for ${period.period_name}:`, newTariff[period.period_name]);
+      } else {
+        console.log(`No setpoint found for period: ${period.period_name}`);
       }
     }
     
@@ -86,7 +91,7 @@ async function loadTariffConfig() {
     
     // Log current configuration
     for (const [name, config] of Object.entries(TARIFF)) {
-      log(`${name}: ${config.start}-${config.end}, setpoint: ${config.gridSetpoint}W, mode: ${config.essMode}`);
+      log(`${name}: ${config.startTime}-${config.endTime}, setpoint: ${config.gridSetpoint}W, ESS: ${config.essMode}, Inv: ${config.inverterMode}`);
     }
     
     return true;
@@ -104,29 +109,33 @@ function stopSetpointAdjuster() {
   }
 }
 
-// Victron ESS Modes for the inverter
+
+// ESS Modes (Settings/CGwacs/BatteryLife/State) - Controls ESS behavior
 const ESS_MODES = {
-  CHARGER_ONLY: 1,
-  INVERTER_ONLY: 2,
-  ON: 3,
-  OFF: 4
+  OPTIMIZE_WITH_BATTERYLIFE: 1,     // Optimized mode with BatteryLife enabled
+  KEEP_BATTERIES_CHARGED: 9,        // Keep batteries charged mode
+  OPTIMIZE_WITHOUT_BATTERYLIFE: 10  // Optimized mode without BatteryLife
 };
 
-// Inverter Modes (vebus/0/Mode)
+// Inverter Modes (vebus/0/Mode) - Controls inverter operation
 const INVERTER_MODES = {
-  CHARGER_ONLY: 1,        // Optimize without battery (charger only)
-  INVERTER_ONLY: 2,       // Inverter only mode
-  ON: 3,                  // Optimize with battery (normal operation)
-  OFF: 4                  // Off
+  CHARGER_ONLY: 1,        // Charger only mode (no inverting)
+  INVERTER_ONLY: 2,       // Inverter only mode (no charging)
+  ON: 3,                  // Normal operation (charge and invert)
+  OFF: 4                  // Inverter off
 };
 
 // MQTT Topics for control and monitoring
 const MQTT_TOPICS = {
   // Control topics (write)
-  ESS_MODE_WRITE: `W/${DEVICE_ID}/vebus/276/Mode`,
-  INVERTER_MODE_WRITE: `W/${DEVICE_ID}/vebus/0/Mode`,
+  ESS_MODE_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/State`,
+  INVERTER_MODE_WRITE: `W/${DEVICE_ID}/vebus/276/Mode`,
   GRID_SETPOINT_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/AcPowerSetPoint`,
   HUB4_MODE_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/Hub4Mode`,
+  
+  // ESS Mode 2 control registers (higher priority than direct inverter control)
+  ESS_DISABLE_CHARGE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/MaxChargeCurrent`,
+  ESS_DISABLE_INVERTER: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/MaxDischargePower`,
   
   // Monitor topics (read)
   BATTERY_SOC: `N/${DEVICE_ID}/vebus/276/Soc`,
@@ -137,13 +146,15 @@ const MQTT_TOPICS = {
   GRID_IMPORT: `N/${DEVICE_ID}/system/0/Ac/Consumption/L1/Power`,
   SOLAR_POWER: `N/${DEVICE_ID}/system/0/Dc/Pv/Power`,
   LOAD_POWER: `N/${DEVICE_ID}/system/0/Ac/Consumption/L1/Power`,
-  ESS_MODE_READ: `N/${DEVICE_ID}/vebus/276/Mode`,
+  ESS_MODE_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/State`,
+  INVERTER_MODE_READ: `N/${DEVICE_ID}/vebus/276/Mode`,
   SYSTEM_STATE: `N/${DEVICE_ID}/vebus/276/State`
 };
 
 // System state variables
 let currentSOC = 0;
-let currentMode = 0;
+let currentMode = 0;  // ESS mode
+let currentInverterMode = 0;  // Inverter mode
 let currentVoltage = 0;
 let currentCurrent = 0;
 let currentPower = 0;
@@ -230,22 +241,6 @@ async function getCurrentTariffPeriod() {
     
     if (result.rows.length > 0) {
       const row = result.rows[0];
-      
-      // Update TARIFF object with current period data
-      TARIFF[row.period_name] = {
-        import: parseFloat(row.import_rate_pence),
-        export: parseFloat(row.export_rate_pence),
-        start: row.start_time.slice(0, 5),
-        end: row.end_time.slice(0, 5),
-        gridSetpoint: parseInt(row.grid_setpoint_watts),
-        targetSOC: row.target_soc_percent ? parseFloat(row.target_soc_percent) : null,
-        maxSOC: parseFloat(result.max_soc_percent),
-        targetSOC: result.target_soc_percent ? parseFloat(result.target_soc_percent) : null,
-        essMode: parseInt(result.ess_mode),
-        inverterMode: parseInt(result.inverter_mode),
-        description: result.description
-      };
-      
       return row.period_name;
     }
     
@@ -263,20 +258,19 @@ async function getCurrentTariffPeriod() {
   }
 }
 
-// Set ESS mode
+// Set ESS mode (Settings/CGwacs/BatteryLife/State) - Controls ESS behavior
 function setESSMode(mode) {
   if (!mqttClient || !mqttClient.connected) {
     log('MQTT client not connected, cannot set ESS mode', "ERROR");
     return false;
   }
-
+  
   const modeNames = {
-    1: 'CHARGER_ONLY',
-    2: 'INVERTER_ONLY', 
-    3: 'ON',
-    4: 'OFF'
+    1: 'Optimize with BatteryLife',
+    9: 'Keep batteries charged', 
+    10: 'Optimize without BatteryLife'
   };
-
+  
   log(`Setting ESS mode to ${mode} (${modeNames[mode] || 'UNKNOWN'})`);
   
   const payload = JSON.stringify({ value: mode });
@@ -284,28 +278,39 @@ function setESSMode(mode) {
     if (err) {
       log(`Failed to set ESS mode: ${err.message}`, "ERROR");
     } else {
-      log(`ESS mode command sent successfully`);
+      log('ESS mode command sent successfully');
     }
   });
-  
   return true;
 }
 
-// Set Inverter Mode (vebus/0/Mode)
+// Set Inverter Mode (vebus/276/Mode) - Controls inverter operation
 function setInverterMode(mode) {
   if (!mqttClient || !mqttClient.connected) {
     log('MQTT client not connected, cannot set inverter mode', "ERROR");
     return false;
   }
   
+  // Skip if already at target mode
+  if (currentInverterMode === mode) {
+    log(`Inverter already at mode ${mode}, skipping`);
+    return true;
+  }
+  
+  // Warning for potentially conflicting modes with ESS
+  if (mode === INVERTER_MODES.INVERTER_ONLY && currentMode === ESS_MODES.OPTIMIZE_WITH_BATTERYLIFE) {
+    log(`WARNING: Setting Inverter-Only mode while ESS is in Optimize mode may cause conflicts`, "WARN");
+  }
+  
   const modeNames = {
-    [INVERTER_MODES.CHARGER_ONLY]: 'Charger Only (optimize without battery)',
-    [INVERTER_MODES.INVERTER_ONLY]: 'Inverter Only',
-    [INVERTER_MODES.ON]: 'On (optimize with battery)',
-    [INVERTER_MODES.OFF]: 'Off'
+    1: 'Charger Only',
+    2: 'Inverter Only', 
+    3: 'ON (Normal operation)',
+    4: 'OFF'
   };
   
-  log(`Setting inverter mode to ${mode} (${modeNames[mode] || 'Unknown mode'})`);
+  log(`Setting inverter mode from ${currentInverterMode} to ${mode} (${modeNames[mode] || 'Unknown mode'})`);
+  log(`Publishing to MQTT topic: ${MQTT_TOPICS.INVERTER_MODE_WRITE}`);
   const payload = JSON.stringify({ value: mode });
   mqttClient.publish(MQTT_TOPICS.INVERTER_MODE_WRITE, payload, (err) => {
     if (err) log(`Failed to set inverter mode: ${err.message}`, "ERROR");
@@ -313,21 +318,6 @@ function setInverterMode(mode) {
   });
   return true;
 }
-
-// Set Hub4Mode (1 = External control via setpoint)
-// function setHub4Mode(mode = 1) {
-//   if (!mqttClient || !mqttClient.connected) {
-//     log('MQTT client not connected, cannot set Hub4Mode', "ERROR");
-//     return false;
-//   }
-//   log(`Setting Hub4Mode to ${mode}`);
-//   const payload = JSON.stringify({ value: mode });
-//   mqttClient.publish(MQTT_TOPICS.HUB4_MODE_WRITE, payload, (err) => {
-//     if (err) log(`Failed to set Hub4Mode: ${err.message}`, "ERROR");
-//     else log('Hub4Mode command sent successfully');
-//   });
-//   return true;
-// }
 
 // Set grid setpoint
 function setGridSetpoint(watts) {
@@ -392,8 +382,8 @@ async function trackEnergyUsage() {
     const loadKwh = Math.max(0, loadPower) * timeDiffHours / 1000;
     
     // Calculate costs and earnings (pence)
-    const importCost = gridImportKwh * tariffConfig.import;
-    const exportEarnings = gridExportKwh * tariffConfig.export;
+    const importCost = gridImportKwh * tariffConfig.importRate;
+    const exportEarnings = gridExportKwh * tariffConfig.exportRate;
     const netCost = importCost - exportEarnings;
     
     const query = `
@@ -407,7 +397,7 @@ async function trackEnergyUsage() {
     `;
     
     await dbClient.query(query, [
-      DEVICE_ID, currentTariffPeriod, tariffConfig.import, tariffConfig.export,
+      DEVICE_ID, currentTariffPeriod, tariffConfig.importRate, tariffConfig.exportRate,
       gridImportKwh, gridExportKwh, solarKwh,
       batteryChargeKwh, batteryDischargeKwh, loadKwh,
       importCost, exportEarnings, netCost,
@@ -436,6 +426,7 @@ async function applyTariffStrategy() {
   const newPeriod = await getCurrentTariffPeriod();
   const tariffConfig = TARIFF[newPeriod];
   console.log(`Applying tariff strategy for ${newPeriod}: ${JSON.stringify(tariffConfig)}`);
+  console.log(`Available TARIFF periods: ${JSON.stringify(Object.keys(TARIFF))}`);
   // Check if tariff period changed
   if (newPeriod !== currentTariffPeriod) {
     log(`Tariff period changed: ${currentTariffPeriod} -> ${newPeriod}`);
@@ -446,6 +437,7 @@ async function applyTariffStrategy() {
   log(`Current period: ${newPeriod} - ${tariffConfig.description}`);
   log(`SOC: ${currentSOC}%, Target: ${tariffConfig.targetSOC || 'N/A'}%, Min: ${tariffConfig.minSOC}%`);
   log(`Grid: ${gridPower}W, Solar: ${solarPower}W, Battery: ${currentPower}W, Load: ${loadPower}W`);
+  log(`Current ESS Mode: ${currentMode}, Current Inverter Mode: ${currentInverterMode}`);
   
   let needsModeChange = false;
   let needsSetpointChange = false;
@@ -453,7 +445,7 @@ async function applyTariffStrategy() {
   // Apply tariff-specific strategy
   switch (newPeriod) {
     case 'Night':
-      // Night: Use database-configured inverter mode
+      // Night: Use database-configured modes
       setInverterMode(tariffConfig.inverterMode);
       if (currentSOC < tariffConfig.targetSOC) {
         if (currentMode !== tariffConfig.essMode) {
@@ -466,9 +458,9 @@ async function applyTariffStrategy() {
         }
         log(`Night charging: SOC ${currentSOC}% < target ${tariffConfig.targetSOC}%`);
       } else {
-        // Target reached, switch to normal mode but maintain setpoint
-        if (currentMode !== ESS_MODES.ON) {
-          setESSMode(ESS_MODES.ON);
+        // Target reached, use database-configured ESS mode
+        if (currentMode !== tariffConfig.essMode) {
+          setESSMode(tariffConfig.essMode);
           needsModeChange = true;
         }
         log(`Night target reached: SOC ${currentSOC}% >= ${tariffConfig.targetSOC}%`);
@@ -568,6 +560,18 @@ function connectMQTT() {
         case MQTT_TOPICS.ESS_MODE_READ:
           currentMode = value;
           break;
+        case MQTT_TOPICS.INVERTER_MODE_READ:
+          if (currentInverterMode !== value) {
+            const modeNames = {
+              1: 'Charger Only',
+              2: 'Inverter Only', 
+              3: 'ON (Normal operation)',
+              4: 'OFF'
+            };
+            log(`Inverter mode changed from ${currentInverterMode} (${modeNames[currentInverterMode] || 'Unknown'}) to ${value} (${modeNames[value] || 'Unknown'}) - Device feedback`);
+          }
+          currentInverterMode = value;
+          break;
       }
     } catch (err) {
       log(`Error processing message on ${topic}: ${err.message}`, "ERROR");
@@ -613,9 +617,14 @@ async function gracefulShutdown(signal) {
     clearInterval(energyTrackingInterval);
   }
   
-  // Return to safe mode
+  // Return to safe mode - use current tariff configuration
   if (mqttClient && mqttClient.connected) {
-    setESSMode(ESS_MODES.ON);
+    // Use current tariff config for safe shutdown
+    const currentTariff = TARIFF[currentTariffPeriod];
+    if (currentTariff) {
+      setESSMode(currentTariff.essMode);
+      setInverterMode(currentTariff.inverterMode);
+    }
     setGridSetpoint(0);
   }
   
@@ -650,6 +659,9 @@ async function gracefulShutdown(signal) {
       log('Failed to load tariff configuration, exiting', 'ERROR');
       process.exit(1);
     }
+    
+    // Debug: Show loaded TARIFF object
+    console.log('Loaded TARIFF object:', JSON.stringify(TARIFF, null, 2));
     
     // Connect to MQTT broker
     mqttClient = mqtt.connect(MQTT_BROKER);
@@ -698,6 +710,18 @@ async function gracefulShutdown(signal) {
             break;
           case MQTT_TOPICS.ESS_MODE_READ:
             currentMode = value;
+            break;
+          case MQTT_TOPICS.INVERTER_MODE_READ:
+            if (currentInverterMode !== value) {
+              const modeNames = {
+                1: 'Charger Only',
+                2: 'Inverter Only', 
+                3: 'ON (Normal operation)',
+                4: 'OFF'
+              };
+              log(`Inverter mode changed from ${currentInverterMode} (${modeNames[currentInverterMode] || 'Unknown'}) to ${value} (${modeNames[value] || 'Unknown'}) - Device feedback`);
+            }
+            currentInverterMode = value;
             break;
         }
       } catch (err) {

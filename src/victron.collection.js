@@ -15,11 +15,11 @@ const DEVICE_ID = process.env.DEVICE_ID || "c0619ab786e2";
 
 // Database configuration
 const DB_CONFIG = {
-  user: process.env.DB_USER || "postgres",
-  host: process.env.DB_HOST || "localhost",
-  database: process.env.DB_NAME || "victron",
-  password: process.env.DB_PASSWORD || "password",
-  port: process.env.DB_PORT || 5433,
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
 };
 
 const LOG_FILE = path.join(__dirname, "../logs/victron-collection22.log");

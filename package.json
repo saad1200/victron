@@ -6,6 +6,7 @@
     "start": "node server.js",
     "victron.collection": "node ./src/victron.collection.js",
     "victron.controller": "node ./src/victron.controller.js",
+    "dashboard": "node ./src/dashboard-api.js",
     "delete.data": "node delete-all-data.js"
   },
   "author": "",

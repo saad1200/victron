@@ -12,25 +12,35 @@ require("dotenv").config();
 
 // Database configuration
 const DB_CONFIG = {
-  user: process.env.DB_USER || "postgres",
-  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "admin",
+  host: process.env.DB_HOST || "192.168.9.185",
   database: process.env.DB_NAME || "victron",
   password: process.env.DB_PASSWORD || "password",
-  port: process.env.DB_PORT || 5432,
+  port: process.env.DB_PORT || 5433,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 };
 
-// List of all Victron tables
+// List of data tables (excluding configuration tables used by controller)
 const VICTRON_TABLES = [
-  'victron_metrics',
   'victron_battery_data',
-  'victron_pv_data',
+  'victron_battery_snapshots',
+  'victron_charge_events',
+  'victron_charge_sessions',
+  'victron_energy_tracking',
   'victron_grid_data',
   'victron_inverter_data',
-  'victron_system_events'
+  'victron_metrics',
+  'victron_pv_data',
+  'victron_system_events',
+  'victron_tariff_events'
 ];
+
+// Configuration tables excluded (used by controller for input/configuration):
+// - victron_charge_config
+// - victron_grid_setpoints  
+// - victron_tariff_periods
 
 // Logging function
 function log(message, level = "INFO") {
