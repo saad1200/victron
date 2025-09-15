@@ -4,13 +4,6 @@ This project contains a smart charging controller and data logger for Victron en
 
 ## Components
 
-### 1. Core Controller (`core.js`)
-Smart charging controller that optimizes battery charging/discharging based on:
-- Solar generation forecasts
-- Octopus Flux tariff periods
-- Battery state of charge
-- Grid export limits
-
 ### 2. Web Server (`server.js`)
 Simple web interface to view system logs at `http://localhost:3000`
 
