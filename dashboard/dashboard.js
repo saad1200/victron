@@ -110,7 +110,7 @@ class SolarDashboard {
         const netProfit = totalEarnings - totalCost;
         
         // Calculate self-consumption savings
-        this.calculateSelfConsumptionSavings(summary);
+        this.calculateSelfConsumptionSavings(summary, this.currentData?.tariffBreakdown);
         
         const stats = [
             {
@@ -746,13 +746,19 @@ class SolarDashboard {
         });
     }
 
-    calculateSelfConsumptionSavings(summary) {
+    calculateSelfConsumptionSavings(summary, tariffBreakdown) {
+        console.log('calculateSelfConsumptionSavings called with:', summary, tariffBreakdown);
+        
         // Tariff rates in pence per kWh
-        const DAY_RATE = 31.488; // pence/kWh
-        const NIGHT_RATE = 14.877; // pence/kWh
+        const TARIFF_RATES = {
+            'Day': 31.488,
+            'Night': 14.877,
+            'Evening': 31.488,
+            'Peak': 31.488,
+            'PEAK': 31.488  // Handle uppercase variant
+        };
         
         // Calculate self-consumed energy
-        // Self-consumption = Solar Generation - Export (what was used directly)
         const totalSolar = summary.totalSolar || 0;
         const totalExport = summary.totalExport || 0;
         const selfConsumedEnergy = Math.max(0, totalSolar - totalExport);
@@ -760,17 +766,40 @@ class SolarDashboard {
         // Calculate self-consumption rate
         const selfConsumptionRate = totalSolar > 0 ? (selfConsumedEnergy / totalSolar) * 100 : 0;
         
-        // For simplicity, assume 70% of consumption happens during day rate, 30% during night rate
-        // This could be enhanced with actual time-based data in the future
-        const dayConsumption = selfConsumedEnergy * 0.7;
-        const nightConsumption = selfConsumedEnergy * 0.3;
+        // Calculate total savings using actual tariff breakdown if available
+        let totalSavings = 0;
+        let periodBreakdowns = [];
         
-        // Calculate savings (cost avoided by not importing from grid)
-        const daySavings = dayConsumption * (DAY_RATE / 100); // Convert pence to pounds
-        const nightSavings = nightConsumption * (NIGHT_RATE / 100);
-        const totalSavings = daySavings + nightSavings;
+        if (tariffBreakdown && tariffBreakdown.breakdown) {
+            // Use actual tariff period data
+            periodBreakdowns = tariffBreakdown.breakdown.map(period => {
+                const rate = TARIFF_RATES[period.period] || 31.488;
+                const selfConsumed = Math.max(0, (period.import + period.export) - period.export);
+                const savings = selfConsumed * (rate / 100);
+                totalSavings += savings;
+                
+                return {
+                    period: period.period,
+                    import: period.import,
+                    export: period.export,
+                    selfConsumed: selfConsumed,
+                    savings: savings,
+                    rate: rate,
+                    profit: period.profit / 100, // Convert from pence to pounds
+                    importCost: period.importCost / 100,
+                    exportEarnings: period.exportEarnings / 100
+                };
+            });
+        } else {
+            // Fallback calculation
+            const dayConsumption = selfConsumedEnergy * 0.7;
+            const nightConsumption = selfConsumedEnergy * 0.3;
+            const daySavings = dayConsumption * (TARIFF_RATES.Day / 100);
+            const nightSavings = nightConsumption * (TARIFF_RATES.Night / 100);
+            totalSavings = daySavings + nightSavings;
+        }
         
-        // Update the UI elements
+        // Update the main UI elements
         const selfConsumedElement = document.getElementById('selfConsumedEnergy');
         const gridCostAvoidedElement = document.getElementById('gridCostAvoided');
         const selfConsumptionRateElement = document.getElementById('selfConsumptionRate');
@@ -787,14 +816,50 @@ class SolarDashboard {
             selfConsumptionRateElement.textContent = `${selfConsumptionRate.toFixed(1)}%`;
         }
         
+        // Update detailed period breakdown
+        this.updateTariffPeriodBreakdown(periodBreakdowns);
+        
         // Store for potential future use
         this.selfConsumptionData = {
             selfConsumedEnergy,
             totalSavings,
             selfConsumptionRate,
-            daySavings,
-            nightSavings
+            periodBreakdowns
         };
+    }
+    
+    updateTariffPeriodBreakdown(periodBreakdowns) {
+        const container = document.getElementById('tariffPeriodBreakdown');
+        if (!container || !periodBreakdowns.length) return;
+        
+        const periodColors = {
+            'Day': { bg: 'linear-gradient(135deg, #fef3c7, #fde68a)', border: '#f59e0b', text: '#92400e' },
+            'Night': { bg: 'linear-gradient(135deg, #e0e7ff, #c7d2fe)', border: '#6366f1', text: '#3730a3' },
+            'Evening': { bg: 'linear-gradient(135deg, #fce7f3, #fbcfe8)', border: '#ec4899', text: '#be185d' },
+            'Peak': { bg: 'linear-gradient(135deg, #fee2e2, #fecaca)', border: '#ef4444', text: '#dc2626' },
+            'PEAK': { bg: 'linear-gradient(135deg, #fee2e2, #fecaca)', border: '#ef4444', text: '#dc2626' }
+        };
+        
+        container.innerHTML = periodBreakdowns.map(period => {
+            const colors = periodColors[period.period] || periodColors['Day'];
+            return `
+                <div style="background: ${colors.bg}; border-radius: 10px; padding: 15px; border-left: 4px solid ${colors.border};">
+                    <h5 style="color: ${colors.text}; margin-bottom: 10px; font-size: 0.9rem; font-weight: 600; text-transform: uppercase;">${period.period} Period</h5>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.85rem;">
+                        <div><strong>Import:</strong> ${period.import.toFixed(2)} kWh</div>
+                        <div><strong>Export:</strong> ${period.export.toFixed(2)} kWh</div>
+                        <div><strong>Self-Used:</strong> ${period.selfConsumed.toFixed(2)} kWh</div>
+                        <div><strong>Rate:</strong> ${period.rate.toFixed(3)}p/kWh</div>
+                        <div><strong>Import Cost:</strong> £${period.importCost.toFixed(2)}</div>
+                        <div><strong>Export Earn:</strong> £${period.exportEarnings.toFixed(2)}</div>
+                        <div style="grid-column: 1 / -1; margin-top: 5px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.1);">
+                            <strong>Savings:</strong> £${period.savings.toFixed(2)} | 
+                            <strong>Net Profit:</strong> <span style="color: ${period.profit >= 0 ? '#059669' : '#dc2626'};">£${period.profit.toFixed(2)}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
     }
 }
 
