@@ -52,7 +52,7 @@ async function loadTariffConfig() {
     // Get grid setpoints
     const setpointsQuery = `
       SELECT tariff_period, grid_setpoint_watts, min_soc_percent, max_soc_percent, 
-             target_soc_percent, ess_mode, description
+             target_soc_percent, ess_mode, inverter_mode, description
       FROM victron_grid_setpoints 
       WHERE device_id = $1 AND is_active = true
     `;
@@ -66,16 +66,17 @@ async function loadTariffConfig() {
       
       if (setpoint) {
         newTariff[period.period_name] = {
-          import: parseFloat(period.import_rate_pence),
-          export: parseFloat(period.export_rate_pence),
-          start: period.start_time.slice(0, 5), // HH:MM format
-          end: period.end_time.slice(0, 5),
-          gridSetpoint: parseInt(setpoint.grid_setpoint_watts),
-          targetSOC: setpoint.target_soc_percent ? parseFloat(setpoint.target_soc_percent) : null,
-          minSOC: parseFloat(setpoint.min_soc_percent || 10),
-          maxSOC: parseFloat(setpoint.max_soc_percent || 100),
-          essMode: parseInt(setpoint.ess_mode || 3),
-          description: setpoint.description || `${period.period_name} period`
+          importRate: parseFloat(period.import_rate_pence),
+          exportRate: parseFloat(period.export_rate_pence),
+          startTime: period.start_time,
+          endTime: period.end_time,
+          gridSetpoint: setpoint ? parseInt(setpoint.grid_setpoint_watts) : 0,
+          minSOC: setpoint ? parseFloat(setpoint.min_soc_percent) : 10,
+          maxSOC: setpoint ? parseFloat(setpoint.max_soc_percent) : 100,
+          targetSOC: setpoint ? parseFloat(setpoint.target_soc_percent) : null,
+          essMode: setpoint ? parseInt(setpoint.ess_mode) : 3,
+          inverterMode: setpoint ? parseInt(setpoint.inverter_mode) : 3,
+          description: setpoint ? setpoint.description : `${period.period_name} period`
         };
       }
     }
@@ -103,7 +104,7 @@ function stopSetpointAdjuster() {
   }
 }
 
-// Victron ESS Mode values
+// Victron ESS Modes for the inverter
 const ESS_MODES = {
   CHARGER_ONLY: 1,
   INVERTER_ONLY: 2,
@@ -111,10 +112,19 @@ const ESS_MODES = {
   OFF: 4
 };
 
+// Inverter Modes (vebus/0/Mode)
+const INVERTER_MODES = {
+  CHARGER_ONLY: 1,        // Optimize without battery (charger only)
+  INVERTER_ONLY: 2,       // Inverter only mode
+  ON: 3,                  // Optimize with battery (normal operation)
+  OFF: 4                  // Off
+};
+
 // MQTT Topics for control and monitoring
 const MQTT_TOPICS = {
   // Control topics (write)
   ESS_MODE_WRITE: `W/${DEVICE_ID}/vebus/276/Mode`,
+  INVERTER_MODE_WRITE: `W/${DEVICE_ID}/vebus/0/Mode`,
   GRID_SETPOINT_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/AcPowerSetPoint`,
   HUB4_MODE_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/Hub4Mode`,
   
@@ -194,6 +204,7 @@ async function getCurrentTariffPeriod() {
         vgs.max_soc_percent,
         vgs.target_soc_percent,
         vgs.ess_mode,
+        vgs.inverter_mode,
         vgs.description
       FROM victron_tariff_periods vtp 
       JOIN victron_grid_setpoints vgs ON vtp.period_name = vgs.tariff_period 
@@ -228,10 +239,11 @@ async function getCurrentTariffPeriod() {
         end: row.end_time.slice(0, 5),
         gridSetpoint: parseInt(row.grid_setpoint_watts),
         targetSOC: row.target_soc_percent ? parseFloat(row.target_soc_percent) : null,
-        minSOC: parseFloat(row.min_soc_percent || 10),
-        maxSOC: parseFloat(row.max_soc_percent || 100),
-        essMode: parseInt(row.ess_mode || 3),
-        description: row.description || `${row.period_name} period`
+        maxSOC: parseFloat(result.max_soc_percent),
+        targetSOC: result.target_soc_percent ? parseFloat(result.target_soc_percent) : null,
+        essMode: parseInt(result.ess_mode),
+        inverterMode: parseInt(result.inverter_mode),
+        description: result.description
       };
       
       return row.period_name;
@@ -279,20 +291,43 @@ function setESSMode(mode) {
   return true;
 }
 
-// Set Hub4Mode (1 = External control via setpoint)
-function setHub4Mode(mode = 1) {
+// Set Inverter Mode (vebus/0/Mode)
+function setInverterMode(mode) {
   if (!mqttClient || !mqttClient.connected) {
-    log('MQTT client not connected, cannot set Hub4Mode', "ERROR");
+    log('MQTT client not connected, cannot set inverter mode', "ERROR");
     return false;
   }
-  log(`Setting Hub4Mode to ${mode}`);
+  
+  const modeNames = {
+    [INVERTER_MODES.CHARGER_ONLY]: 'Charger Only (optimize without battery)',
+    [INVERTER_MODES.INVERTER_ONLY]: 'Inverter Only',
+    [INVERTER_MODES.ON]: 'On (optimize with battery)',
+    [INVERTER_MODES.OFF]: 'Off'
+  };
+  
+  log(`Setting inverter mode to ${mode} (${modeNames[mode] || 'Unknown mode'})`);
   const payload = JSON.stringify({ value: mode });
-  mqttClient.publish(MQTT_TOPICS.HUB4_MODE_WRITE, payload, (err) => {
-    if (err) log(`Failed to set Hub4Mode: ${err.message}`, "ERROR");
-    else log('Hub4Mode command sent successfully');
+  mqttClient.publish(MQTT_TOPICS.INVERTER_MODE_WRITE, payload, (err) => {
+    if (err) log(`Failed to set inverter mode: ${err.message}`, "ERROR");
+    else log('Inverter mode command sent successfully');
   });
   return true;
 }
+
+// Set Hub4Mode (1 = External control via setpoint)
+// function setHub4Mode(mode = 1) {
+//   if (!mqttClient || !mqttClient.connected) {
+//     log('MQTT client not connected, cannot set Hub4Mode', "ERROR");
+//     return false;
+//   }
+//   log(`Setting Hub4Mode to ${mode}`);
+//   const payload = JSON.stringify({ value: mode });
+//   mqttClient.publish(MQTT_TOPICS.HUB4_MODE_WRITE, payload, (err) => {
+//     if (err) log(`Failed to set Hub4Mode: ${err.message}`, "ERROR");
+//     else log('Hub4Mode command sent successfully');
+//   });
+//   return true;
+// }
 
 // Set grid setpoint
 function setGridSetpoint(watts) {
@@ -418,8 +453,8 @@ async function applyTariffStrategy() {
   // Apply tariff-specific strategy
   switch (newPeriod) {
     case 'Night':
-      // Night: Charge to 70% SOC with 3kW import limit
-      setHub4Mode(1);
+      // Night: Use database-configured inverter mode
+      setInverterMode(tariffConfig.inverterMode);
       if (currentSOC < tariffConfig.targetSOC) {
         if (currentMode !== tariffConfig.essMode) {
           setESSMode(tariffConfig.essMode);
@@ -442,9 +477,8 @@ async function applyTariffStrategy() {
       
     case 'Day':
     case 'Evening':
-      // Day/Evening: Use ESS mode and exact setpoint from database
-      setHub4Mode(1); // External control
-      
+      // Day/Evening: Use database-configured inverter mode
+      setInverterMode(tariffConfig.inverterMode);
       if (currentMode !== tariffConfig.essMode) {
         setESSMode(tariffConfig.essMode);
         needsModeChange = true;
@@ -456,10 +490,11 @@ async function applyTariffStrategy() {
       
       // Stop any dynamic adjustment - use exact database values
       stopSetpointAdjuster();
+      break;
       
     case 'PEAK':
-      // Peak: Maximum export, discharge battery at full rate
-      setHub4Mode(1);
+      // Peak: Use database-configured inverter mode
+      setInverterMode(tariffConfig.inverterMode);
       if (currentMode !== tariffConfig.essMode) {
         setESSMode(tariffConfig.essMode);
         needsModeChange = true;
