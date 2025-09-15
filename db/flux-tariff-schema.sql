@@ -28,7 +28,6 @@ CREATE TABLE victron_grid_setpoints (
     grid_setpoint_watts INTEGER NOT NULL, -- Positive = import limit, Negative = export target
     min_soc_percent DECIMAL(5,2) DEFAULT 10.0,
     max_soc_percent DECIMAL(5,2) DEFAULT 100.0,
-    target_soc_percent DECIMAL(5,2),
     ess_mode INTEGER, -- ESS mode to use during this period
     inverter_mode INTEGER DEFAULT 3, -- Inverter mode: 1=CHARGER_ONLY, 2=INVERTER_ONLY, 3=ON, 4=OFF
     description TEXT,
@@ -134,7 +133,7 @@ INSERT INTO victron_tariff_periods (period_name, import_rate_pence, export_rate_
 ON CONFLICT DO NOTHING;
 
 -- Insert grid setpoint configurations for each tariff period
-INSERT INTO victron_grid_setpoints (device_id, tariff_period, grid_setpoint_watts, min_soc_percent, max_soc_percent, target_soc_percent, ess_mode, inverter_mode, description) VALUES
+INSERT INTO victron_grid_setpoints (device_id, tariff_period, grid_setpoint_watts, min_soc_percent, max_soc_percent, ess_mode, inverter_mode, description) VALUES
 ('c0619ab786e2', 'Night', 3000, 10.0, 70.0, 70.0, 1, 1, 'Night charging: Import up to 3kW to charge battery to 70% - Charger Only mode'),
 ('c0619ab786e2', 'Day', 0, 10.0, 100.0, NULL, 3, 3, 'Day: Solar priority, 0W setpoint, maintain min 10% SOC - Inverter ON'),
 ('c0619ab786e2', 'Evening', 0, 10.0, 100.0, NULL, 3, 3, 'Evening: Solar priority, 0W setpoint, maintain min 10% SOC - Inverter ON'),
@@ -143,7 +142,6 @@ ON CONFLICT (device_id, tariff_period) DO UPDATE SET
     grid_setpoint_watts = EXCLUDED.grid_setpoint_watts,
     min_soc_percent = EXCLUDED.min_soc_percent,
     max_soc_percent = EXCLUDED.max_soc_percent,
-    target_soc_percent = EXCLUDED.target_soc_percent,
     ess_mode = EXCLUDED.ess_mode,
     inverter_mode = EXCLUDED.inverter_mode,
     description = EXCLUDED.description,

@@ -52,7 +52,7 @@ async function loadTariffConfig() {
     // Get grid setpoints
     const setpointsQuery = `
       SELECT tariff_period, grid_setpoint_watts, min_soc_percent, max_soc_percent, 
-             target_soc_percent, ess_mode, inverter_mode, description
+             active_soc_percent, ess_mode, inverter_mode, description
       FROM victron_grid_setpoints 
       WHERE device_id = $1 AND is_active = true
     `;
@@ -75,7 +75,7 @@ async function loadTariffConfig() {
           gridSetpoint: parseInt(setpoint.grid_setpoint_watts),
           minSOC: parseFloat(setpoint.min_soc_percent),
           maxSOC: parseFloat(setpoint.max_soc_percent),
-          targetSOC: setpoint.target_soc_percent ? parseFloat(setpoint.target_soc_percent) : null,
+          activeSOC: setpoint.active_soc_percent ? parseFloat(setpoint.active_soc_percent) : 50.0,
           essMode: parseInt(setpoint.ess_mode),
           inverterMode: parseInt(setpoint.inverter_mode),
           description: setpoint.description
@@ -132,6 +132,9 @@ const MQTT_TOPICS = {
   INVERTER_MODE_WRITE: `W/${DEVICE_ID}/vebus/276/Mode`,
   GRID_SETPOINT_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/AcPowerSetPoint`,
   HUB4_MODE_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/Hub4Mode`,
+  MIN_SOC_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/MinimumSocLimit`,
+  MAX_SOC_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/MaxChargeCurrent`,
+  ACTIVE_SOC_WRITE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/SocLimit`,
   
   // ESS Mode 2 control registers (higher priority than direct inverter control)
   ESS_DISABLE_CHARGE: `W/${DEVICE_ID}/settings/0/Settings/CGwacs/MaxChargeCurrent`,
@@ -149,6 +152,9 @@ const MQTT_TOPICS = {
   ESS_MODE_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/State`,
   INVERTER_MODE_READ: `N/${DEVICE_ID}/vebus/276/Mode`,
   SYSTEM_STATE: `N/${DEVICE_ID}/vebus/276/State`,
+  MIN_SOC_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/MinimumSocLimit`,
+  MAX_SOC_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/MaxChargeCurrent`,
+  ACTIVE_SOC_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/SocLimit`,
   
 };
 
@@ -156,6 +162,9 @@ const MQTT_TOPICS = {
 let currentSOC = 0;
 let currentMode = 0;  // ESS mode
 let currentInverterMode = 0;  // Inverter mode
+let currentMinSOC = 0;  // Current minimum SOC setting
+let currentMaxSOC = 100;  // Current maximum SOC setting
+let currentActiveSOC = 50;  // Current active SOC setting
 let currentVoltage = 0;
 let currentCurrent = 0;
 let currentPower = 0;
@@ -205,7 +214,7 @@ async function getCurrentTariffPeriod() {
         vgs.grid_setpoint_watts,
         vgs.min_soc_percent,
         vgs.max_soc_percent,
-        vgs.target_soc_percent,
+        vgs.active_soc_percent,
         vgs.ess_mode,
         vgs.inverter_mode,
         vgs.description
@@ -278,8 +287,8 @@ function setESSMode(mode) {
 
 // Set Inverter Mode (vebus/276/Mode) - Controls inverter operation
 function setInverterMode(mode) {
-  if (!mqttClient || !mqttClient.connected) {
-    log('MQTT client not connected, cannot set inverter mode', "ERROR");
+  if (!mqttClient || !mqttClient.connected || mode == 0) {
+    log(`MQTT client not connected, cannot set inverter mode. mode: ${mode}`, "ERROR");
     return false;
   }
   
@@ -308,6 +317,93 @@ function setInverterMode(mode) {
     if (err) log(`Failed to set inverter mode: ${err.message}`, "ERROR");
     else log('Inverter mode command sent successfully');
   });
+  return true;
+}
+
+// Set minimum SOC
+function setMinSOC(socPercent) {
+  if (!mqttClient || !mqttClient.connected) {
+    log('MQTT client not connected, cannot set minimum SOC', "ERROR");
+    return false;
+  }
+
+  // Skip if already at target minSOC
+  if (currentMinSOC === socPercent) {
+    log(`MinSOC already at ${socPercent}%, skipping`);
+    return true;
+  }
+
+  log(`Setting minimum SOC from ${currentMinSOC}% to ${socPercent}%`);
+  log(`Publishing to MQTT topic: ${MQTT_TOPICS.MIN_SOC_WRITE}`);
+  
+  const payload = JSON.stringify({ value: socPercent });
+  mqttClient.publish(MQTT_TOPICS.MIN_SOC_WRITE, payload, (err) => {
+    if (err) {
+      log(`Failed to set minimum SOC: ${err.message}`, "ERROR");
+    } else {
+      log(`Minimum SOC command sent successfully`);
+      currentMinSOC = socPercent;
+    }
+  });
+  
+  return true;
+}
+
+// Set maximum SOC
+function setMaxSOC(socPercent) {
+  if (!mqttClient || !mqttClient.connected) {
+    log('MQTT client not connected, cannot set maximum SOC', "ERROR");
+    return false;
+  }
+
+  // Skip if already at target maxSOC
+  if (currentMaxSOC === socPercent) {
+    log(`MaxSOC already at ${socPercent}%, skipping`);
+    return true;
+  }
+
+  log(`Setting maximum SOC from ${currentMaxSOC}% to ${socPercent}%`);
+  log(`Publishing to MQTT topic: ${MQTT_TOPICS.MAX_SOC_WRITE}`);
+  
+  const payload = JSON.stringify({ value: socPercent });
+  mqttClient.publish(MQTT_TOPICS.MAX_SOC_WRITE, payload, (err) => {
+    if (err) {
+      log(`Failed to set maximum SOC: ${err.message}`, "ERROR");
+    } else {
+      log(`Maximum SOC command sent successfully`);
+      currentMaxSOC = socPercent;
+    }
+  });
+  
+  return true;
+}
+
+// Set active SOC limit
+function setActiveSOC(socPercent) {
+  if (!mqttClient || !mqttClient.connected) {
+    log('MQTT client not connected, cannot set active SOC', "ERROR");
+    return false;
+  }
+
+  // Skip if already at target activeSOC
+  if (currentActiveSOC === socPercent) {
+    log(`ActiveSOC already at ${socPercent}%, skipping`);
+    return true;
+  }
+
+  log(`Setting active SOC from ${currentActiveSOC}% to ${socPercent}%`);
+  log(`Publishing to MQTT topic: ${MQTT_TOPICS.ACTIVE_SOC_WRITE}`);
+  
+  const payload = JSON.stringify({ value: socPercent });
+  mqttClient.publish(MQTT_TOPICS.ACTIVE_SOC_WRITE, payload, (err) => {
+    if (err) {
+      log(`Failed to set active SOC: ${err.message}`, "ERROR");
+    } else {
+      log(`Active SOC command sent successfully`);
+      currentActiveSOC = socPercent;
+    }
+  });
+  
   return true;
 }
 
@@ -371,35 +467,32 @@ async function applyTariffStrategy() {
   }
   
   log(`Current period: ${newPeriod} - ${tariffConfig.description}`);
-  log(`SOC: ${currentSOC}%, Target: ${tariffConfig.targetSOC || 'N/A'}%, Min: ${tariffConfig.minSOC}%`);
+  log(`SOC: ${currentSOC}%, Min: ${tariffConfig.minSOC}%, Active: ${tariffConfig.activeSOC}%, Max: ${tariffConfig.maxSOC}%`);
   log(`Grid: ${gridPower}W, Solar: ${solarPower}W, Battery: ${currentPower}W, Load: ${loadPower}W`);
-  log(`Current ESS Mode: ${currentMode}, Current Inverter Mode: ${currentInverterMode}`);
+  log(`Current ESS Mode: ${currentMode}, Current Inverter Mode: ${currentInverterMode}, Current MinSOC: ${currentMinSOC}%, Current ActiveSOC: ${currentActiveSOC}%, Current MaxSOC: ${currentMaxSOC}%`);
   
   let needsModeChange = false;
   let needsSetpointChange = false;
+  let needsMinSOCChange = false;
+  let needsMaxSOCChange = false;
+  let needsActiveSOCChange = false;
   
   // Apply tariff-specific strategy
   switch (newPeriod) {
     case 'Night':
       // Night: Use database-configured modes
       setInverterMode(tariffConfig.inverterMode);
-      if (currentSOC < tariffConfig.targetSOC) {
-        if (currentMode !== tariffConfig.essMode) {
-          setESSMode(tariffConfig.essMode);
-          needsModeChange = true;
-        }
-        if (currentGridSetpoint !== tariffConfig.gridSetpoint) {
-          setGridSetpoint(tariffConfig.gridSetpoint);
-          needsSetpointChange = true;
-        }
-        log(`Night charging: SOC ${currentSOC}% < target ${tariffConfig.targetSOC}%`);
-      } else {
-        // Target reached, use database-configured ESS mode
-        if (currentMode !== tariffConfig.essMode) {
-          setESSMode(tariffConfig.essMode);
-          needsModeChange = true;
-        }
-        log(`Night target reached: SOC ${currentSOC}% >= ${tariffConfig.targetSOC}%`);
+      if (currentMinSOC !== tariffConfig.minSOC) {
+        setMinSOC(tariffConfig.minSOC);
+        needsMinSOCChange = true;
+      }
+      if (currentMaxSOC !== tariffConfig.maxSOC) {
+        setMaxSOC(tariffConfig.maxSOC);
+        needsMaxSOCChange = true;
+      }
+      if (currentActiveSOC !== tariffConfig.activeSOC) {
+        setActiveSOC(tariffConfig.activeSOC);
+        needsActiveSOCChange = true;
       }
       break;
       
@@ -407,6 +500,18 @@ async function applyTariffStrategy() {
     case 'Evening':
       // Day/Evening: Use database-configured inverter mode
       setInverterMode(tariffConfig.inverterMode);
+      if (currentMinSOC !== tariffConfig.minSOC) {
+        setMinSOC(tariffConfig.minSOC);
+        needsMinSOCChange = true;
+      }
+      if (currentMaxSOC !== tariffConfig.maxSOC) {
+        setMaxSOC(tariffConfig.maxSOC);
+        needsMaxSOCChange = true;
+      }
+      if (currentActiveSOC !== tariffConfig.activeSOC) {
+        setActiveSOC(tariffConfig.activeSOC);
+        needsActiveSOCChange = true;
+      }
       if (currentMode !== tariffConfig.essMode) {
         setESSMode(tariffConfig.essMode);
         needsModeChange = true;
@@ -423,6 +528,18 @@ async function applyTariffStrategy() {
     case 'PEAK':
       // Peak: Use database-configured inverter mode
       setInverterMode(tariffConfig.inverterMode);
+      if (currentMinSOC !== tariffConfig.minSOC) {
+        setMinSOC(tariffConfig.minSOC);
+        needsMinSOCChange = true;
+      }
+      if (currentMaxSOC !== tariffConfig.maxSOC) {
+        setMaxSOC(tariffConfig.maxSOC);
+        needsMaxSOCChange = true;
+      }
+      if (currentActiveSOC !== tariffConfig.activeSOC) {
+        setActiveSOC(tariffConfig.activeSOC);
+        needsActiveSOCChange = true;
+      }
       if (currentMode !== tariffConfig.essMode) {
         setESSMode(tariffConfig.essMode);
         needsModeChange = true;
@@ -443,6 +560,15 @@ async function applyTariffStrategy() {
   }
   if (needsSetpointChange) {
     await logTariffEvent('setpoint_change', `Grid setpoint changed to ${tariffConfig.gridSetpoint}W for ${newPeriod} period`);
+  }
+  if (needsMinSOCChange) {
+    await logTariffEvent('minsoc_change', `MinSOC changed to ${tariffConfig.minSOC}% for ${newPeriod} period`);
+  }
+  if (needsMaxSOCChange) {
+    await logTariffEvent('maxsoc_change', `MaxSOC changed to ${tariffConfig.maxSOC}% for ${newPeriod} period`);
+  }
+  if (needsActiveSOCChange) {
+    await logTariffEvent('activesoc_change', `ActiveSOC changed to ${tariffConfig.activeSOC}% for ${newPeriod} period`);
   }
 }
 
@@ -507,6 +633,24 @@ function connectMQTT() {
             log(`Inverter mode changed from ${currentInverterMode} (${modeNames[currentInverterMode] || 'Unknown'}) to ${value} (${modeNames[value] || 'Unknown'}) - Device feedback`);
           }
           currentInverterMode = value;
+          break;
+        case MQTT_TOPICS.MIN_SOC_READ:
+          if (currentMinSOC !== value) {
+            log(`MinSOC changed from ${currentMinSOC}% to ${value}% - Device feedback`);
+          }
+          currentMinSOC = value;
+          break;
+        case MQTT_TOPICS.MAX_SOC_READ:
+          if (currentMaxSOC !== value) {
+            log(`MaxSOC changed from ${currentMaxSOC}% to ${value}% - Device feedback`);
+          }
+          currentMaxSOC = value;
+          break;
+        case MQTT_TOPICS.ACTIVE_SOC_READ:
+          if (currentActiveSOC !== value) {
+            log(`ActiveSOC changed from ${currentActiveSOC}% to ${value}% - Device feedback`);
+          }
+          currentActiveSOC = value;
           break;
       }
     } catch (err) {

@@ -748,6 +748,7 @@ class SolarDashboard {
 
     calculateSelfConsumptionSavings(summary, tariffBreakdown) {
         console.log('calculateSelfConsumptionSavings called with:', summary, tariffBreakdown);
+        console.log('tariffBreakdown.breakdown:', tariffBreakdown?.breakdown);
         
         // Tariff rates in pence per kWh
         const TARIFF_RATES = {
@@ -778,7 +779,7 @@ class SolarDashboard {
                 const savings = selfConsumed * (rate / 100);
                 totalSavings += savings;
                 
-                return {
+                const result = {
                     period: period.period,
                     import: period.import,
                     export: period.export,
@@ -789,6 +790,8 @@ class SolarDashboard {
                     importCost: period.importCost / 100,
                     exportEarnings: period.exportEarnings / 100
                 };
+                console.log(`Period ${period.period} breakdown:`, result);
+                return result;
             });
         } else {
             // Fallback calculation
