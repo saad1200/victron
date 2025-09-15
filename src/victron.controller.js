@@ -549,10 +549,6 @@ async function gracefulShutdown(signal) {
   
   log(`Shutting down Flux controller (${signal})...`);
   
-  if (energyTrackingInterval) {
-    clearInterval(energyTrackingInterval);
-  }
-  
   // Return to safe mode - use current tariff configuration
   if (mqttClient && mqttClient.connected) {
     // Use current tariff config for safe shutdown
