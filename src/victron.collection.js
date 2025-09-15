@@ -350,10 +350,10 @@ async function trackEnergyUsage() {
     
     // Get current tariff config (simplified - would need to load from DB)
     const tariffRates = {
-      'Day': { importRate: 24.5, exportRate: 15.0 },
-      'Evening': { importRate: 24.5, exportRate: 15.0 },
-      'Night': { importRate: 7.5, exportRate: 15.0 },
-      'PEAK': { importRate: 39.0, exportRate: 15.0 }
+      'Day': { importRate: 31.488, exportRate: 10.2 },
+      'Evening': { importRate: 31.488, exportRate: 10.2 },
+      'Night': { importRate: 14.877, exportRate: 10.2 },
+      'PEAK': { importRate: 31.488, exportRate: 10.2 }
     };
     
     const tariffConfig = tariffRates[currentTariffPeriod] || tariffRates['Day'];
@@ -402,6 +402,37 @@ async function trackEnergyUsage() {
     
   } catch (error) {
     log(`Energy tracking error: ${error.message}`, "ERROR");
+  }
+}
+
+// Initialize data collection
+async function initializeDataCollection() {
+  try {
+    await dbClient.connect();
+    log('Database connected successfully');
+    
+    // Get initial tariff period
+    await getCurrentTariffPeriod();
+    
+    // Initialize MQTT client
+    mqttClient = mqtt.connect(MQTT_BROKER);
+    
+    mqttClient.on('connect', () => {
+      log('Connected to MQTT broker');
+      
+      // Subscribe to all topics
+      Object.values(MQTT_TOPICS).forEach(topic => {
+        mqttClient.subscribe(topic, (err) => {
+          if (err) {
+            log(`Failed to subscribe to ${topic}: ${err.message}`, "ERROR");
+          }
+        });
+      });
+      
+      log(`Subscribed to ${Object.keys(MQTT_TOPICS).length} monitoring topics`);
+    });
+  } catch (error) {
+    log(`Failed to initialize data collection: ${error.message}`, "ERROR");
   }
 }
 
@@ -621,6 +652,56 @@ setInterval(async () => {
 setInterval(async () => {
   await trackEnergyUsage();
 }, 300000);
+
+// Get current tariff period and configuration from database
+async function getCurrentTariffPeriod() {
+  try {
+    const now = new Date();
+    const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
+    
+    const query = `
+      SELECT 
+        vtp.period_name,
+        vtp.import_rate_pence,
+        vtp.export_rate_pence,
+        vtp.start_time,
+        vtp.end_time
+      FROM victron_tariff_periods vtp 
+      WHERE vtp.is_active = true
+        AND (
+          -- Handle overnight periods (start_time > end_time)
+          (vtp.start_time > vtp.end_time AND ($1::time >= vtp.start_time OR $1::time < vtp.end_time))
+          OR
+          -- Handle normal periods (start_time <= end_time)  
+          (vtp.start_time <= vtp.end_time AND $1::time >= vtp.start_time AND $1::time < vtp.end_time)
+        )
+      ORDER BY 
+        CASE 
+          WHEN vtp.start_time > vtp.end_time THEN 1 
+          ELSE 0 
+        END,
+        vtp.start_time
+      LIMIT 1
+    `;
+    
+    const result = await dbClient.query(query, [currentTime]);
+    
+    if (result.rows.length > 0) {
+      const period = result.rows[0];
+      currentTariffPeriod = period.period_name;
+      log(`Current tariff period: ${currentTariffPeriod} (${period.start_time}-${period.end_time})`, "INFO");
+      return currentTariffPeriod;
+    } else {
+      log(`No active tariff period found for time ${currentTime}`, "WARN");
+      currentTariffPeriod = 'Day'; // Default fallback
+      return currentTariffPeriod;
+    }
+  } catch (err) {
+    log(`Error getting current tariff period: ${err.message}`, "ERROR");
+    currentTariffPeriod = 'Day'; // Default fallback
+    return currentTariffPeriod;
+  }
+}
 
 // Periodic tariff period check (every minute)
 setInterval(async () => {
