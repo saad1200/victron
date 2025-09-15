@@ -109,6 +109,9 @@ class SolarDashboard {
         const totalEarnings = summary.exportEarnings;
         const netProfit = totalEarnings - totalCost;
         
+        // Calculate self-consumption savings
+        this.calculateSelfConsumptionSavings(summary);
+        
         const stats = [
             {
                 title: 'Total Energy Import',
@@ -174,6 +177,9 @@ class SolarDashboard {
         this.renderFinancialChart(data.financial);
         this.renderBatteryChart(data.battery);
         this.renderTariffChart(data.tariffBreakdown);
+        console.log('PV Arrays data from API:', data.tariffBreakdown?.pvArrays);
+        this.updatePvArraysChart(data.tariffBreakdown?.pvArrays || []);
+        SolarDashboard.updateArrayGenerationChart(data.tariffBreakdown?.pvArrays || []);
     }
 
     renderEnergyChart(timeSeries) {
@@ -379,16 +385,21 @@ class SolarDashboard {
             this.charts.tariff.destroy();
         }
 
-        const periods = ['Night', 'Day', 'PEAK', 'Evening'];
+        // Handle the breakdown array from API response
+        const breakdown = tariffData.breakdown || [];
+        if (breakdown.length === 0) {
+            return; // Skip rendering if no data
+        }
+
         const colors = ['#1e40af', '#f59e0b', '#dc2626', '#7c3aed'];
 
         this.charts.tariff = new Chart(ctx, {
             type: 'doughnut',
             data: {
-                labels: periods.map(p => `${p} (${(tariffData[p]?.profit / 100 || 0).toFixed(2)}$)`),
+                labels: breakdown.map(item => `${item.period} (£${(item.profit / 100).toFixed(2)})`),
                 datasets: [{
-                    data: periods.map(p => Math.abs(tariffData[p]?.profit || 0)),
-                    backgroundColor: colors,
+                    data: breakdown.map(item => Math.abs(item.profit)),
+                    backgroundColor: colors.slice(0, breakdown.length),
                     borderWidth: 2,
                     borderColor: '#fff'
                 }]
@@ -496,6 +507,294 @@ class SolarDashboard {
                 }
             }
         });
+    }
+
+    updatePvArraysChart(pvArrays) {
+        const ctx = document.getElementById('pvArraysChart').getContext('2d');
+        
+        if (this.pvArraysChart) {
+            this.pvArraysChart.destroy();
+        }
+        
+        if (pvArrays.length === 0) {
+            // Show message when no data
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#666';
+            ctx.fillText('No PV array data available for selected date range', ctx.canvas.width / 2, ctx.canvas.height / 2);
+            return;
+        }
+        
+        // Physical panel layout mapping
+        const arrayInfo = {
+            0: { location: 'North House Roof', panels: 10, orientation: 'North' },
+            1: { location: 'South House Roof', panels: 11, orientation: 'South' },
+            2: { location: 'Garage Roof', panels: 4, orientation: 'South' },
+            3: { location: 'Ground Mount', panels: 7, orientation: 'South' }
+        };
+        
+        // Calculate efficiency (W per panel)
+        const enhancedData = pvArrays.map(array => {
+            const info = arrayInfo[array.arrayId] || { location: `Array ${array.arrayId}`, panels: 1, orientation: 'Unknown' };
+            return {
+                ...array,
+                ...info,
+                avgWPerPanel: array.avgPower / info.panels,
+                maxWPerPanel: array.maxPower / info.panels,
+                efficiency: (array.avgPower / (info.panels * 400)) * 100 // Assuming 400W panels
+            };
+        });
+        
+        this.pvArraysChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: enhancedData.map(array => `Array ${array.arrayId}`),
+                datasets: [{
+                    label: 'Average Power (W)',
+                    data: enhancedData.map(array => array.avgPower),
+                    backgroundColor: 'rgba(34, 197, 94, 0.8)',
+                    borderColor: 'rgba(34, 197, 94, 1)',
+                    borderWidth: 1,
+                    yAxisID: 'y'
+                }, {
+                    label: 'Max Power (W)',
+                    data: enhancedData.map(array => array.maxPower),
+                    backgroundColor: 'rgba(249, 115, 22, 0.8)',
+                    borderColor: 'rgba(249, 115, 22, 1)',
+                    borderWidth: 1,
+                    yAxisID: 'y'
+                }, {
+                    label: 'Efficiency (%)',
+                    data: enhancedData.map(array => array.efficiency),
+                    backgroundColor: 'rgba(99, 102, 241, 0.8)',
+                    borderColor: 'rgba(99, 102, 241, 1)',
+                    borderWidth: 1,
+                    type: 'line',
+                    yAxisID: 'y1'
+                }]
+            },
+            options: {
+                responsive: true,
+                interaction: {
+                    mode: 'index',
+                    intersect: false,
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: 'Solar Array Location'
+                        }
+                    },
+                    y: {
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Power (W)'
+                        }
+                    },
+                    y1: {
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        beginAtZero: true,
+                        max: 100,
+                        title: {
+                            display: true,
+                            text: 'Efficiency (%)'
+                        },
+                        grid: {
+                            drawOnChartArea: false,
+                        },
+                    }
+                },
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Solar Array Performance - 32 Panels Total',
+                        font: {
+                            size: 16
+                        }
+                    },
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: function(context) {
+                                const array = enhancedData[context[0].dataIndex];
+                                return `Array ${array.arrayId} - ${array.location}`;
+                            },
+                            afterLabel: function(context) {
+                                const array = enhancedData[context.dataIndex];
+                                return [
+                                    `Location: ${array.location}`,
+                                    `Panels: ${array.panels} (${array.orientation} facing)`,
+                                    `Avg W/panel: ${array.avgWPerPanel.toFixed(1)}W`,
+                                    `Max W/panel: ${array.maxWPerPanel.toFixed(1)}W`,
+                                    `Readings: ${array.readings}`
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    static updateArrayGenerationChart(pvArrays) {
+        const ctx = document.getElementById('arrayGenerationChart').getContext('2d');
+        
+        console.log('updateArrayGenerationChart called with:', pvArrays);
+        
+        if (!pvArrays || pvArrays.length === 0) {
+            // Show message when no data
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#666';
+            ctx.fillText('No PV array data available for selected date range', ctx.canvas.width / 2, ctx.canvas.height / 2);
+            return;
+        }
+
+        // Physical panel layout mapping
+        const arrayInfo = {
+            0: { location: 'North House Roof', panels: 10, orientation: 'North' },
+            1: { location: 'South House Roof', panels: 11, orientation: 'South' },
+            2: { location: 'Garage Roof', panels: 4, orientation: 'South' },
+            3: { location: 'Ground Mount', panels: 7, orientation: 'South' }
+        };
+
+        // Calculate total generation (kWh) for each array
+        const enhancedData = pvArrays.map(array => {
+            const info = arrayInfo[array.arrayId] || { location: `Array ${array.arrayId}`, panels: 1, orientation: 'Unknown' };
+            // Estimate daily generation: avgPower * hours of sunlight (assume 8 hours average)
+            const estimatedDailyKwh = (array.avgPower * 8) / 1000;
+            return {
+                ...array,
+                ...info,
+                estimatedDailyKwh,
+                avgWPerPanel: array.avgPower / info.panels
+            };
+        });
+
+        if (this.arrayGenerationChart) {
+            this.arrayGenerationChart.destroy();
+        }
+
+        this.arrayGenerationChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: enhancedData.map(array => `Array ${array.arrayId}`),
+                datasets: [{
+                    label: 'Estimated Daily Generation (kWh)',
+                    data: enhancedData.map(array => array.estimatedDailyKwh),
+                    backgroundColor: [
+                        'rgba(59, 130, 246, 0.8)',  // Blue for Array 0
+                        'rgba(34, 197, 94, 0.8)',   // Green for Array 1
+                        'rgba(251, 191, 36, 0.8)',  // Yellow for Array 2
+                        'rgba(239, 68, 68, 0.8)'    // Red for Array 3
+                    ],
+                    borderColor: [
+                        'rgba(59, 130, 246, 1)',
+                        'rgba(34, 197, 94, 1)',
+                        'rgba(251, 191, 36, 1)',
+                        'rgba(239, 68, 68, 1)'
+                    ],
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Daily Generation Distribution by Array',
+                        font: {
+                            size: 16
+                        }
+                    },
+                    legend: {
+                        display: true,
+                        position: 'bottom'
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: function(context) {
+                                const array = enhancedData[context[0].dataIndex];
+                                return `Array ${array.arrayId} - ${array.location}`;
+                            },
+                            label: function(context) {
+                                const array = enhancedData[context.dataIndex];
+                                const percentage = ((array.estimatedDailyKwh / enhancedData.reduce((sum, a) => sum + a.estimatedDailyKwh, 0)) * 100).toFixed(1);
+                                return [
+                                    `Est. Daily: ${array.estimatedDailyKwh.toFixed(2)} kWh (${percentage}%)`,
+                                    `Avg Power: ${array.avgPower.toFixed(0)}W`,
+                                    `W/Panel: ${array.avgWPerPanel.toFixed(1)}W`,
+                                    `${array.panels} panels (${array.orientation})`
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    calculateSelfConsumptionSavings(summary) {
+        // Tariff rates in pence per kWh
+        const DAY_RATE = 31.488; // pence/kWh
+        const NIGHT_RATE = 14.877; // pence/kWh
+        
+        // Calculate self-consumed energy
+        // Self-consumption = Solar Generation - Export (what was used directly)
+        const totalSolar = summary.totalSolar || 0;
+        const totalExport = summary.totalExport || 0;
+        const selfConsumedEnergy = Math.max(0, totalSolar - totalExport);
+        
+        // Calculate self-consumption rate
+        const selfConsumptionRate = totalSolar > 0 ? (selfConsumedEnergy / totalSolar) * 100 : 0;
+        
+        // For simplicity, assume 70% of consumption happens during day rate, 30% during night rate
+        // This could be enhanced with actual time-based data in the future
+        const dayConsumption = selfConsumedEnergy * 0.7;
+        const nightConsumption = selfConsumedEnergy * 0.3;
+        
+        // Calculate savings (cost avoided by not importing from grid)
+        const daySavings = dayConsumption * (DAY_RATE / 100); // Convert pence to pounds
+        const nightSavings = nightConsumption * (NIGHT_RATE / 100);
+        const totalSavings = daySavings + nightSavings;
+        
+        // Update the UI elements
+        const selfConsumedElement = document.getElementById('selfConsumedEnergy');
+        const gridCostAvoidedElement = document.getElementById('gridCostAvoided');
+        const selfConsumptionRateElement = document.getElementById('selfConsumptionRate');
+        
+        if (selfConsumedElement) {
+            selfConsumedElement.textContent = `${selfConsumedEnergy.toFixed(2)} kWh`;
+        }
+        
+        if (gridCostAvoidedElement) {
+            gridCostAvoidedElement.textContent = `£${totalSavings.toFixed(2)}`;
+        }
+        
+        if (selfConsumptionRateElement) {
+            selfConsumptionRateElement.textContent = `${selfConsumptionRate.toFixed(1)}%`;
+        }
+        
+        // Store for potential future use
+        this.selfConsumptionData = {
+            selfConsumedEnergy,
+            totalSavings,
+            selfConsumptionRate,
+            daySavings,
+            nightSavings
+        };
     }
 }
 

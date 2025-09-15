@@ -205,6 +205,39 @@ async function getBatteryData(startDate, endDate) {
 }
 
 async function getTariffBreakdown(startDate, endDate) {
+  const summaryQuery = `
+    SELECT 
+      SUM(solar_generation_kwh) as total_solar,
+      SUM(grid_import_kwh) as total_import,
+      SUM(grid_export_kwh) as total_export,
+      SUM(import_cost_pence) as import_cost,
+      SUM(export_earnings_pence) as export_earnings,
+      AVG(battery_soc_end) as avg_soc
+    FROM victron_energy_tracking 
+    WHERE DATE(tracking_timestamp) >= $1::date 
+      AND DATE(tracking_timestamp) <= $2::date
+  `;
+  
+  const summaryResult = await dbClient.query(summaryQuery, [startDate, endDate]);
+  const summary = summaryResult.rows[0];
+  
+  const pvArrayQuery = `
+    SELECT 
+      array_id,
+      AVG(power_watts) as avg_power,
+      MAX(power_watts) as max_power,
+      COUNT(*) as readings
+    FROM victron_pv_arrays 
+    WHERE DATE(timestamp) >= $1::date 
+      AND DATE(timestamp) <= $2::date
+      AND power_watts > 0
+    GROUP BY array_id
+    ORDER BY array_id
+  `;
+  
+  const pvArrayResult = await dbClient.query(pvArrayQuery, [startDate, endDate]);
+  const pvArrays = pvArrayResult.rows;
+  
   const query = `
     SELECT 
       tariff_period,
@@ -220,18 +253,28 @@ async function getTariffBreakdown(startDate, endDate) {
   
   const result = await dbClient.query(query, [startDate, endDate]);
   
-  const breakdown = {};
-  result.rows.forEach(row => {
-    breakdown[row.tariff_period] = {
-      totalImport: parseFloat(row.total_import || 0),
-      totalExport: parseFloat(row.total_export || 0),
+  return {
+    totalSolar: parseFloat(summary.total_solar || 0),
+    totalImport: parseFloat(summary.total_import || 0),
+    totalExport: parseFloat(summary.total_export || 0),
+    importCost: parseFloat(summary.import_cost || 0),
+    exportEarnings: parseFloat(summary.export_earnings || 0),
+    avgSoc: parseFloat(summary.avg_soc || 0),
+    pvArrays: pvArrays.map(row => ({
+      arrayId: row.array_id,
+      avgPower: parseFloat(row.avg_power || 0),
+      maxPower: parseFloat(row.max_power || 0),
+      readings: parseInt(row.readings || 0)
+    })),
+    breakdown: result.rows.map(row => ({
+      period: row.tariff_period,
+      import: parseFloat(row.total_import || 0),
+      export: parseFloat(row.total_export || 0),
       importCost: parseFloat(row.import_cost || 0),
       exportEarnings: parseFloat(row.export_earnings || 0),
       profit: parseFloat(row.profit || 0)
-    };
-  });
-  
-  return breakdown;
+    }))
+  };
 }
 
 // Health check endpoint

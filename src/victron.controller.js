@@ -148,7 +148,8 @@ const MQTT_TOPICS = {
   LOAD_POWER: `N/${DEVICE_ID}/system/0/Ac/Consumption/L1/Power`,
   ESS_MODE_READ: `N/${DEVICE_ID}/settings/0/Settings/CGwacs/BatteryLife/State`,
   INVERTER_MODE_READ: `N/${DEVICE_ID}/vebus/276/Mode`,
-  SYSTEM_STATE: `N/${DEVICE_ID}/vebus/276/State`
+  SYSTEM_STATE: `N/${DEVICE_ID}/vebus/276/State`,
+  
 };
 
 // System state variables
@@ -164,17 +165,8 @@ let loadPower = 0;
 let currentTariffPeriod = null;
 let currentGridSetpoint = 0;
 let mqttClient = null;
-let energyTrackingInterval = null;
 let setpointAdjustTimer = null;
-let lastEnergyReading = {
-  timestamp: Date.now(),
-  gridImport: 0,
-  gridExport: 0,
-  solarGeneration: 0,
-  batteryCharge: 0,
-  batteryDischarge: 0,
-  loadConsumption: 0
-};
+
 
 // Logging helper
 async function log(message, level = "INFO") {
@@ -364,62 +356,6 @@ async function logTariffEvent(eventType, description, fromPeriod = null, toPerio
   }
 }
 
-async function trackEnergyUsage() {
-  try {
-    const now = Date.now();
-    const timeDiffHours = (now - lastEnergyReading.timestamp) / (1000 * 60 * 60);
-    
-    if (timeDiffHours < 0.01) return; // Skip if less than 36 seconds
-    
-    const tariffConfig = TARIFF[currentTariffPeriod];
-    
-    // Calculate energy deltas (kWh)
-    const gridImportKwh = Math.max(0, gridPower) * timeDiffHours / 1000;
-    const gridExportKwh = Math.max(0, -gridPower) * timeDiffHours / 1000;
-    const solarKwh = Math.max(0, solarPower) * timeDiffHours / 1000;
-    const batteryChargeKwh = Math.max(0, currentPower) * timeDiffHours / 1000;
-    const batteryDischargeKwh = Math.max(0, -currentPower) * timeDiffHours / 1000;
-    const loadKwh = Math.max(0, loadPower) * timeDiffHours / 1000;
-    
-    // Calculate costs and earnings (pence)
-    const importCost = gridImportKwh * tariffConfig.importRate;
-    const exportEarnings = gridExportKwh * tariffConfig.exportRate;
-    const netCost = importCost - exportEarnings;
-    
-    const query = `
-      INSERT INTO victron_energy_tracking (
-        device_id, tariff_period, import_rate_pence, export_rate_pence,
-        grid_import_kwh, grid_export_kwh, solar_generation_kwh,
-        battery_charge_kwh, battery_discharge_kwh, load_consumption_kwh,
-        import_cost_pence, export_earnings_pence, net_cost_pence,
-        battery_soc_start, battery_soc_end, grid_setpoint_watts, ess_mode
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-    `;
-    
-    await dbClient.query(query, [
-      DEVICE_ID, currentTariffPeriod, tariffConfig.importRate, tariffConfig.exportRate,
-      gridImportKwh, gridExportKwh, solarKwh,
-      batteryChargeKwh, batteryDischargeKwh, loadKwh,
-      importCost, exportEarnings, netCost,
-      lastEnergyReading.soc || currentSOC, currentSOC,
-      currentGridSetpoint, currentMode
-    ]);
-    
-    // Update last reading
-    lastEnergyReading = {
-      timestamp: now,
-      soc: currentSOC,
-      gridImport: gridImportKwh,
-      gridExport: gridExportKwh,
-      solarGeneration: solarKwh
-    };
-    
-    log(`Energy tracked: Import ${gridImportKwh.toFixed(3)}kWh (${importCost.toFixed(2)}p), Export ${gridExportKwh.toFixed(3)}kWh (${exportEarnings.toFixed(2)}p), Net: ${netCost.toFixed(2)}p`);
-    
-  } catch (err) {
-    log(`Failed to track energy usage: ${err.message}`, "ERROR");
-  }
-}
 
 // Main tariff-based control logic
 async function applyTariffStrategy() {
@@ -723,6 +659,7 @@ async function gracefulShutdown(signal) {
             }
             currentInverterMode = value;
             break;
+          
         }
       } catch (err) {
         log(`Error processing message on ${topic}: ${err.message}`, "ERROR");
@@ -738,18 +675,14 @@ async function gracefulShutdown(signal) {
 
     setupScheduler();
 
-    // Start energy tracking
-    energyTrackingInterval = setInterval(trackEnergyUsage, 60000); // Every minute
-
-    // Initial tariff strategy application
-    setTimeout(async () => {
-      currentTariffPeriod = await getCurrentTariffPeriod();
-      await applyTariffStrategy();
-    }, 5000);
-
-    log('Octopus Flux controller initialized successfully');
-  } catch (err) {
-    log(`Error starting Flux controller: ${err.message}`, "ERROR");
+    
+    // Start tariff monitoring (every minute)
+    setInterval(applyTariffStrategy, 60 * 1000);
+    
+    log('Flux controller started successfully');
+    
+  } catch (error) {
+    log(`Failed to start Flux controller: ${error.message}`, "ERROR");
     process.exit(1);
   }
 })();

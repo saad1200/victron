@@ -40,6 +40,16 @@ const MQTT_TOPICS = {
   PV_VOLTAGE: `N/${DEVICE_ID}/system/0/Dc/Pv/Voltage`,
   PV_CURRENT: `N/${DEVICE_ID}/system/0/Dc/Pv/Current`,
   
+  // Individual PV array topics
+  PV_ARRAY_0_POWER: `N/${DEVICE_ID}/solarcharger/0/Pv/0/P`,
+  PV_ARRAY_0_VOLTAGE: `N/${DEVICE_ID}/solarcharger/0/Pv/0/V`,
+  PV_ARRAY_1_POWER: `N/${DEVICE_ID}/solarcharger/0/Pv/1/P`,
+  PV_ARRAY_1_VOLTAGE: `N/${DEVICE_ID}/solarcharger/0/Pv/1/V`,
+  PV_ARRAY_2_POWER: `N/${DEVICE_ID}/solarcharger/0/Pv/2/P`,
+  PV_ARRAY_2_VOLTAGE: `N/${DEVICE_ID}/solarcharger/0/Pv/2/V`,
+  PV_ARRAY_3_POWER: `N/${DEVICE_ID}/solarcharger/0/Pv/3/P`,
+  PV_ARRAY_3_VOLTAGE: `N/${DEVICE_ID}/solarcharger/0/Pv/3/V`,
+  
   // Grid data (keeping existing as they are working)
   GRID_POWER_L1: `N/${DEVICE_ID}/system/0/Ac/Consumption/L1/Power`,
   GRID_POWER_L2: `N/${DEVICE_ID}/system/0/Ac/Consumption/L2/Power`,
@@ -205,6 +215,33 @@ const pvData = { power: null, voltage: null, current: null };
 const gridData = { power_l1: null, power_l2: null, power_l3: null, voltage_l1: null, frequency: null };
 const inverterData = { power: null, voltage: null, current: null };
 
+// PV array state variables
+const pvArrays = {
+  0: { power: 0, voltage: 0 },
+  1: { power: 0, voltage: 0 },
+  2: { power: 0, voltage: 0 },
+  3: { power: 0, voltage: 0 }
+};
+
+// Energy tracking variables
+let lastEnergyReading = {
+  timestamp: Date.now(),
+  gridImport: 0,
+  gridExport: 0,
+  solarGeneration: 0,
+  batteryCharge: 0,
+  batteryDischarge: 0,
+  loadConsumption: 0
+};
+
+// Current system state for energy tracking
+let currentSOC = 0;
+let gridPower = 0;
+let solarPower = 0;
+let loadPower = 0;
+let currentPower = 0;
+let currentTariffPeriod = null;
+
 async function insertBatteryData() {
   if (Object.values(batteryData).some(v => v !== null)) {
     const query = `
@@ -266,6 +303,105 @@ async function insertInverterData() {
     } catch (err) {
       log(`Failed to insert inverter data: ${err.message}`, "ERROR");
     }
+  }
+}
+
+// Collect PV array data and store in database
+async function collectPvArrayData() {
+  try {
+    // Only collect if we have valid data
+    const totalPower = Object.values(pvArrays).reduce((sum, array) => sum + array.power, 0);
+    if (totalPower === 0) return; // Skip if no solar generation
+    
+    for (let arrayId = 0; arrayId < 4; arrayId++) {
+      const array = pvArrays[arrayId];
+      if (array.power > 0) { // Only store arrays with active generation
+        const query = `
+          INSERT INTO victron_pv_arrays (
+            device_id, array_id, power_watts, voltage_volts
+          ) VALUES ($1, $2, $3, $4)
+        `;
+        
+        await dbClient.query(query, [
+          DEVICE_ID,
+          arrayId,
+          array.power,
+          array.voltage
+        ]);
+      }
+    }
+    
+    log(`PV arrays data collected: Array0=${pvArrays[0].power}W, Array1=${pvArrays[1].power}W, Array2=${pvArrays[2].power}W, Array3=${pvArrays[3].power}W`);
+    
+  } catch (error) {
+    log(`PV array data collection error: ${error.message}`, "ERROR");
+  }
+}
+
+// Energy tracking function moved from controller
+async function trackEnergyUsage() {
+  try {
+    if (!currentTariffPeriod) return; // Skip if no tariff period loaded
+    
+    const now = Date.now();
+    const timeDiffHours = (now - lastEnergyReading.timestamp) / (1000 * 60 * 60);
+    
+    if (timeDiffHours < 0.01) return; // Skip if less than 36 seconds
+    
+    // Get current tariff config (simplified - would need to load from DB)
+    const tariffRates = {
+      'Day': { importRate: 24.5, exportRate: 15.0 },
+      'Evening': { importRate: 24.5, exportRate: 15.0 },
+      'Night': { importRate: 7.5, exportRate: 15.0 },
+      'PEAK': { importRate: 39.0, exportRate: 15.0 }
+    };
+    
+    const tariffConfig = tariffRates[currentTariffPeriod] || tariffRates['Day'];
+    
+    // Calculate energy deltas (kWh)
+    const gridImportKwh = Math.max(0, gridPower) * timeDiffHours / 1000;
+    const gridExportKwh = Math.max(0, -gridPower) * timeDiffHours / 1000;
+    const solarKwh = Math.max(0, solarPower) * timeDiffHours / 1000;
+    const batteryChargeKwh = Math.max(0, currentPower) * timeDiffHours / 1000;
+    const batteryDischargeKwh = Math.max(0, -currentPower) * timeDiffHours / 1000;
+    const loadKwh = Math.max(0, loadPower) * timeDiffHours / 1000;
+    
+    // Calculate costs and earnings (pence)
+    const importCost = gridImportKwh * tariffConfig.importRate;
+    const exportEarnings = gridExportKwh * tariffConfig.exportRate;
+    const netCost = importCost - exportEarnings;
+    
+    const query = `
+      INSERT INTO victron_energy_tracking (
+        device_id, tariff_period, import_rate_pence, export_rate_pence,
+        grid_import_kwh, grid_export_kwh, solar_generation_kwh,
+        battery_charge_kwh, battery_discharge_kwh, load_consumption_kwh,
+        import_cost_pence, export_earnings_pence, net_cost_pence,
+        battery_soc_start, battery_soc_end
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    `;
+    
+    await dbClient.query(query, [
+      DEVICE_ID, currentTariffPeriod, tariffConfig.importRate, tariffConfig.exportRate,
+      gridImportKwh, gridExportKwh, solarKwh,
+      batteryChargeKwh, batteryDischargeKwh, loadKwh,
+      importCost, exportEarnings, netCost,
+      lastEnergyReading.soc || currentSOC, currentSOC
+    ]);
+    
+    // Update last reading
+    lastEnergyReading = {
+      timestamp: now,
+      soc: currentSOC,
+      gridImport: gridImportKwh,
+      gridExport: gridExportKwh,
+      solarGeneration: solarKwh
+    };
+    
+    log(`Energy tracked: Import ${gridImportKwh.toFixed(3)}kWh (${importCost.toFixed(2)}p), Export ${gridExportKwh.toFixed(3)}kWh (${exportEarnings.toFixed(2)}p), Net: ${netCost.toFixed(2)}p`);
+    
+  } catch (error) {
+    log(`Energy tracking error: ${error.message}`, "ERROR");
   }
 }
 
@@ -334,6 +470,7 @@ mqttClient.on("message", async (topic, message) => {
       // PV metrics
       case MQTT_TOPICS.PV_POWER:
         pvData.power = value;
+        solarPower = value; // Update for energy tracking
         await insertMetric(DEVICE_ID, "pv", "power", value, "W", topic);
         break;
       case MQTT_TOPICS.PV_VOLTAGE:
@@ -343,6 +480,32 @@ mqttClient.on("message", async (topic, message) => {
       case MQTT_TOPICS.PV_CURRENT:
         pvData.current = value;
         await insertMetric(DEVICE_ID, "pv", "current", value, "A", topic);
+        break;
+
+      // PV Array power readings
+      case MQTT_TOPICS.PV_ARRAY_0_POWER:
+        pvArrays[0].power = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_0_VOLTAGE:
+        pvArrays[0].voltage = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_1_POWER:
+        pvArrays[1].power = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_1_VOLTAGE:
+        pvArrays[1].voltage = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_2_POWER:
+        pvArrays[2].power = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_2_VOLTAGE:
+        pvArrays[2].voltage = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_3_POWER:
+        pvArrays[3].power = value;
+        break;
+      case MQTT_TOPICS.PV_ARRAY_3_VOLTAGE:
+        pvArrays[3].voltage = value;
         break;
 
       // Grid metrics
@@ -449,7 +612,22 @@ setInterval(async () => {
   }
 }, 30000);
 
-// ---------------- Cleanup ----------------
+// Periodic PV array data collection (every 30 seconds)
+setInterval(async () => {
+  await collectPvArrayData();
+}, 30000);
+
+// Periodic energy tracking (every 5 minutes)
+setInterval(async () => {
+  await trackEnergyUsage();
+}, 300000);
+
+// Periodic tariff period check (every minute)
+setInterval(async () => {
+  await getCurrentTariffPeriod();
+}, 60000);
+
+// ---------------- Shutdown Handler ----------------
 let isShuttingDown = false;
 
 async function gracefulShutdown(signal) {

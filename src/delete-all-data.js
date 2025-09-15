@@ -33,6 +33,7 @@ const VICTRON_TABLES = [
   'victron_inverter_data',
   'victron_metrics',
   'victron_pv_data',
+  'victron_pv_arrays',
   'victron_system_events',
   'victron_tariff_events'
 ];
