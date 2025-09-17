@@ -95,9 +95,39 @@ async function getSummaryData(startDate, endDate) {
     ? (row.total_battery_discharge / row.total_battery_charge) * 100 
     : 0;
     
+  // Enhanced self-consumption: includes direct solar use + battery discharge
+  const directSolarConsumption = parseFloat(row.total_solar) - parseFloat(row.total_export);
+  const batteryConsumption = parseFloat(row.total_battery_discharge);
+  const totalSelfConsumed = directSolarConsumption + batteryConsumption;
+  
   const selfConsumption = row.total_solar > 0 
     ? ((row.total_solar - row.total_export) / row.total_solar) * 100 
     : 0;
+
+  // Calculate cost savings for self-consumed energy
+  // Assume average import rate of 25p/kWh for savings calculation
+  const avgImportRate = 25.0; // pence per kWh
+  const selfConsumedSavings = totalSelfConsumed * avgImportRate;
+
+  // Calculate battery charging sources
+  // Assume solar charging during day (when solar > consumption + export)
+  // Grid charging during night hours (typically 00:30-05:30 at 14.877p/kWh)
+  const totalBatteryCharge = parseFloat(row.total_battery_charge);
+  const totalSolar = parseFloat(row.total_solar);
+  const totalExport = parseFloat(row.total_export);
+  
+  // Estimate solar charging: min of (battery charge, excess solar after export)
+  const excessSolar = Math.max(0, totalSolar - directSolarConsumption);
+  const batteryChargedFromSolar = Math.min(totalBatteryCharge, excessSolar);
+  const batteryChargedFromGrid = Math.max(0, totalBatteryCharge - batteryChargedFromSolar);
+  
+  // Grid charging cost using actual Night tariff rate (02:00-05:00)
+  const nightImportRate = 16.61; // pence per kWh from victron_tariff_periods
+  const gridChargingCost = batteryChargedFromGrid * nightImportRate;
+  
+  // Calculate profit potential if grid-charged energy is sold during PEAK period
+  const peakExportRate = 29.79; // pence per kWh from victron_tariff_periods
+  const gridToPeakProfit = batteryChargedFromGrid * (peakExportRate - nightImportRate);
   
   return {
     totalImport: parseFloat(row.total_import) || 0,
@@ -109,7 +139,13 @@ async function getSummaryData(startDate, endDate) {
     importCost: parseFloat(row.import_cost) || 0,
     exportEarnings: parseFloat(row.export_earnings) || 0,
     batteryEfficiency: batteryEfficiency,
-    selfConsumption: selfConsumption
+    selfConsumption: selfConsumption,
+    totalSelfConsumed: totalSelfConsumed,
+    selfConsumedSavings: selfConsumedSavings,
+    batteryChargedFromSolar: batteryChargedFromSolar,
+    batteryChargedFromGrid: batteryChargedFromGrid,
+    gridChargingCost: gridChargingCost,
+    gridToPeakProfit: gridToPeakProfit
   };
 }
 
@@ -210,6 +246,7 @@ async function getTariffBreakdown(startDate, endDate) {
       SUM(solar_generation_kwh) as total_solar,
       SUM(grid_import_kwh) as total_import,
       SUM(grid_export_kwh) as total_export,
+      SUM(battery_discharge_kwh) as total_battery_discharge,
       SUM(import_cost_pence) as import_cost,
       SUM(export_earnings_pence) as export_earnings,
       AVG(battery_soc_end) as avg_soc
@@ -217,9 +254,29 @@ async function getTariffBreakdown(startDate, endDate) {
     WHERE DATE(tracking_timestamp) >= $1::date 
       AND DATE(tracking_timestamp) <= $2::date
   `;
+
+  // Daily breakdown query for target tracking
+  const dailyQuery = `
+    SELECT 
+      DATE(tracking_timestamp) as date,
+      SUM(solar_generation_kwh) as daily_solar,
+      SUM(grid_import_kwh) as daily_import,
+      SUM(grid_export_kwh) as daily_export,
+      SUM(battery_discharge_kwh) as daily_battery_discharge,
+      SUM(import_cost_pence) as daily_import_cost,
+      SUM(export_earnings_pence) as daily_export_earnings
+    FROM victron_energy_tracking 
+    WHERE DATE(tracking_timestamp) >= $1::date 
+      AND DATE(tracking_timestamp) <= $2::date
+    GROUP BY DATE(tracking_timestamp)
+    ORDER BY DATE(tracking_timestamp)
+  `;
   
   const summaryResult = await dbClient.query(summaryQuery, [startDate, endDate]);
   const summary = summaryResult.rows[0];
+  
+  const dailyResult = await dbClient.query(dailyQuery, [startDate, endDate]);
+  const dailyBreakdown = dailyResult.rows;
   
   const pvArrayQuery = `
     SELECT 
@@ -238,7 +295,7 @@ async function getTariffBreakdown(startDate, endDate) {
   const pvArrayResult = await dbClient.query(pvArrayQuery, [startDate, endDate]);
   const pvArrays = pvArrayResult.rows;
   
-  const query = `
+  const tariffQuery = `
     SELECT 
       tariff_period,
       SUM(grid_import_kwh) as total_import,
@@ -251,8 +308,49 @@ async function getTariffBreakdown(startDate, endDate) {
     GROUP BY tariff_period
   `;
   
-  const result = await dbClient.query(query, [startDate, endDate]);
+  const tariffResult = await dbClient.query(tariffQuery, [startDate, endDate]);
   
+  // Calculate enhanced self-consumption for tariff breakdown
+  const directSolarConsumption = parseFloat(summary.total_solar) - parseFloat(summary.total_export);
+  const batteryConsumption = parseFloat(summary.total_battery_discharge || 0);
+  const totalSelfConsumed = directSolarConsumption + batteryConsumption;
+  const avgImportRate = 25.0; // pence per kWh
+  const selfConsumedSavings = totalSelfConsumed * avgImportRate;
+
+  const batteryChargedFromSolar = Math.min(parseFloat(summary.total_battery_charge || 0), directSolarConsumption);
+  const batteryChargedFromGrid = Math.max(0, parseFloat(summary.total_battery_charge || 0) - batteryChargedFromSolar);
+  const nightImportRate = 16.61; // pence per kWh from victron_tariff_periods
+  const gridChargingCost = batteryChargedFromGrid * nightImportRate;
+  const peakExportRate = 29.79; // pence per kWh from victron_tariff_periods
+  
+  // Calculate proper battery arbitrage: peak export earnings - night import costs for same period
+  const peakExportQuery = `
+    SELECT 
+      SUM(grid_export_kwh) as peak_export_kwh,
+      SUM(export_earnings_pence) as peak_export_earnings
+    FROM victron_energy_tracking 
+    WHERE DATE(tracking_timestamp) >= $1::date 
+      AND DATE(tracking_timestamp) <= $2::date
+      AND tariff_period = 'PEAK'
+  `;
+  
+  const nightImportQuery = `
+    SELECT 
+      SUM(grid_import_kwh) as night_import_kwh,
+      SUM(import_cost_pence) as night_import_cost
+    FROM victron_energy_tracking 
+    WHERE DATE(tracking_timestamp) >= $1::date 
+      AND DATE(tracking_timestamp) <= $2::date
+      AND tariff_period = 'Night'
+  `;
+  
+  const peakExportResult = await dbClient.query(peakExportQuery, [startDate, endDate]);
+  const nightImportResult = await dbClient.query(nightImportQuery, [startDate, endDate]);
+  
+  const peakExportEarnings = parseFloat(peakExportResult.rows[0]?.peak_export_earnings || 0);
+  const nightImportCost = parseFloat(nightImportResult.rows[0]?.night_import_cost || 0);
+  const batteryArbitrageProfit = peakExportEarnings - nightImportCost;
+
   return {
     totalSolar: parseFloat(summary.total_solar || 0),
     totalImport: parseFloat(summary.total_import || 0),
@@ -260,13 +358,46 @@ async function getTariffBreakdown(startDate, endDate) {
     importCost: parseFloat(summary.import_cost || 0),
     exportEarnings: parseFloat(summary.export_earnings || 0),
     avgSoc: parseFloat(summary.avg_soc || 0),
+    totalSelfConsumed: totalSelfConsumed,
+    selfConsumedSavings: selfConsumedSavings,
+    directSolarConsumption: directSolarConsumption,
+    batteryConsumption: batteryConsumption,
+    batteryChargedFromSolar: batteryChargedFromSolar,
+    batteryChargedFromGrid: batteryChargedFromGrid,
+    gridChargingCost: gridChargingCost,
+    batteryArbitrageProfit: batteryArbitrageProfit, // Use proper calculation
+    solarBatterySavings: (directSolarConsumption + batteryConsumption) * avgImportRate, // Use actual average import rate
+    totalGridImportKwh: parseFloat(summary.total_import || 0),
+    totalGridImportCost: parseFloat(summary.import_cost || 0), // Already calculated with accurate tariff periods
+    totalDailySavings: batteryArbitrageProfit + ((directSolarConsumption + batteryConsumption) * avgImportRate) - parseFloat(summary.import_cost || 0),
+    peakExportEarnings: peakExportEarnings,
+    nightImportCost: nightImportCost,
+    solarDirectKwh: directSolarConsumption,
+    batteryDischargeKwh: batteryConsumption,
+    dailyBreakdown: dailyBreakdown.map(day => {
+      const dayDirectSolar = Math.max(0, parseFloat(day.daily_solar || 0) - parseFloat(day.daily_export || 0));
+      const dayBatteryDischarge = parseFloat(day.daily_battery_discharge || 0);
+      const dayArbitrageProfit = batteryArbitrageProfit * (parseFloat(day.daily_battery_discharge || 0) / parseFloat(summary.total_battery_discharge || 1));
+      const daySolarBatterySavings = (dayDirectSolar + dayBatteryDischarge) * avgImportRate;
+      const dayImportCost = parseFloat(day.daily_import_cost || 0);
+      const dayTotalSavings = dayArbitrageProfit + daySolarBatterySavings - dayImportCost;
+      
+      return {
+        date: day.date,
+        arbitrageProfit: dayArbitrageProfit,
+        solarBatterySavings: daySolarBatterySavings,
+        gridImportCost: dayImportCost,
+        totalSavings: dayTotalSavings,
+        targetPercentage: (dayTotalSavings / 700) * 100 // £7 target = 700 pence
+      };
+    }),
     pvArrays: pvArrays.map(row => ({
       arrayId: row.array_id,
       avgPower: parseFloat(row.avg_power || 0),
       maxPower: parseFloat(row.max_power || 0),
       readings: parseInt(row.readings || 0)
     })),
-    breakdown: result.rows.map(row => ({
+    breakdown: tariffResult.rows.map(row => ({
       period: row.tariff_period,
       import: parseFloat(row.total_import || 0),
       export: parseFloat(row.total_export || 0),

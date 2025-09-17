@@ -192,7 +192,6 @@ async function log(message, level = "INFO") {
   const entry = `[${timestamp}] [${level}] ${message}\n`;
   try {
     await fs.appendFile(LOG_FILE, entry);
-    console.log(entry.trim());
   } catch (err) {
     console.error(`Failed to write log: ${err.message}`);
   }
@@ -278,9 +277,10 @@ function setESSMode(mode) {
   mqttClient.publish(MQTT_TOPICS.ESS_MODE_WRITE, payload, (err) => {
     if (err) {
       log(`Failed to set ESS mode: ${err.message}`, "ERROR");
-    } else {
-      log('ESS mode command sent successfully');
-    }
+    } 
+    // else {
+    //   log('ESS mode command sent successfully');
+    // }
   });
   return true;
 }
@@ -452,24 +452,135 @@ async function logTariffEvent(eventType, description, fromPeriod = null, toPerio
   }
 }
 
+// Log charge events to victron_charge_events table
+async function logChargeEvent(eventType, description, options = {}) {
+  try {
+    const query = `
+      INSERT INTO victron_charge_events (
+        device_id, event_type, event_description, battery_soc, 
+        ess_mode_before, ess_mode_after, battery_power, battery_voltage, 
+        battery_current, in_charging_window, should_charge, is_charging,
+        charge_session_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `;
+    
+    await dbClient.query(query, [
+      DEVICE_ID,
+      eventType,
+      description,
+      currentSOC,
+      options.essModeBefore || currentMode,
+      options.essModeAfter || currentMode,
+      currentPower,
+      currentVoltage,
+      currentCurrent,
+      options.inChargingWindow || null,
+      options.shouldCharge || null,
+      options.isCharging || (currentPower > 0),
+      options.chargeSessionId || null
+    ]);
+    
+    log(`Charge event logged: ${eventType} - ${description}`);
+  } catch (err) {
+    log(`Failed to log charge event: ${err.message}`, "ERROR");
+  }
+}
+
+// Charge session management
+let currentChargeSessionId = null;
+
+// Start a new charge session
+async function startChargeSession(targetSOC, windowStart, windowEnd) {
+  try {
+    const query = `
+      INSERT INTO victron_charge_sessions (
+        device_id, start_soc, target_soc, charge_window_start, 
+        charge_window_end, session_status
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+    `;
+    
+    const result = await dbClient.query(query, [
+      DEVICE_ID,
+      currentSOC,
+      targetSOC,
+      windowStart,
+      windowEnd,
+      'active'
+    ]);
+    
+    currentChargeSessionId = result.rows[0].id;
+    log(`Started charge session ${currentChargeSessionId}: Target ${targetSOC}%, Window ${windowStart}-${windowEnd}`);
+    
+    await logChargeEvent('session_start', `Charge session started with target ${targetSOC}%`, {
+      chargeSessionId: currentChargeSessionId,
+      inChargingWindow: true,
+      shouldCharge: true
+    });
+    
+    return currentChargeSessionId;
+  } catch (err) {
+    log(`Failed to start charge session: ${err.message}`, "ERROR");
+    return null;
+  }
+}
+
+// End current charge session
+async function endChargeSession(status = 'completed') {
+  if (!currentChargeSessionId) {
+    return;
+  }
+  
+  try {
+    const query = `
+      UPDATE victron_charge_sessions 
+      SET session_end = CURRENT_TIMESTAMP,
+          end_soc = $1,
+          session_status = $2,
+          total_charge_time_minutes = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - session_start)) / 60,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $3
+    `;
+    
+    await dbClient.query(query, [currentSOC, status, currentChargeSessionId]);
+    
+    log(`Ended charge session ${currentChargeSessionId}: Final SOC ${currentSOC}%, Status: ${status}`);
+    
+    await logChargeEvent('session_end', `Charge session ended with SOC ${currentSOC}%`, {
+      chargeSessionId: currentChargeSessionId,
+      inChargingWindow: false,
+      shouldCharge: false,
+      isCharging: false
+    });
+    
+    currentChargeSessionId = null;
+  } catch (err) {
+    log(`Failed to end charge session: ${err.message}`, "ERROR");
+  }
+}
+
 
 // Main tariff-based control logic
 async function applyTariffStrategy() {
   const newPeriod = await getCurrentTariffPeriod();
   const tariffConfig = TARIFF[newPeriod];
-  console.log(`Applying tariff strategy for ${newPeriod}: ${JSON.stringify(tariffConfig)}`);
-  console.log(`Available TARIFF periods: ${JSON.stringify(Object.keys(TARIFF))}`);
+  // console.log(`Applying tariff strategy for ${newPeriod}: ${JSON.stringify(tariffConfig)}`);
+  // console.log(`Available TARIFF periods: ${JSON.stringify(Object.keys(TARIFF))}`);
   // Check if tariff period changed
   if (newPeriod !== currentTariffPeriod) {
-    log(`Tariff period changed: ${currentTariffPeriod} -> ${newPeriod}`);
+    // log(`Tariff period changed: ${currentTariffPeriod} -> ${newPeriod}`);
     await logTariffEvent('period_change', `Tariff period changed to ${newPeriod}`, currentTariffPeriod, newPeriod);
+    await logChargeEvent('period_change', `Tariff period changed from ${currentTariffPeriod} to ${newPeriod}`, {
+      inChargingWindow: newPeriod === 'Night',
+      shouldCharge: newPeriod === 'Night' && currentSOC < (tariffConfig?.targetSOC || 70)
+    });
     currentTariffPeriod = newPeriod;
   }
   
-  log(`Current period: ${newPeriod} - ${tariffConfig.description}`);
-  log(`SOC: ${currentSOC}%, Min: ${tariffConfig.minSOC}%, Active: ${tariffConfig.activeSOC}%, Max: ${tariffConfig.maxSOC}%`);
-  log(`Grid: ${gridPower}W, Solar: ${solarPower}W, Battery: ${currentPower}W, Load: ${loadPower}W`);
-  log(`Current ESS Mode: ${currentMode}, Current Inverter Mode: ${currentInverterMode}, Current MinSOC: ${currentMinSOC}%, Current ActiveSOC: ${currentActiveSOC}%, Current MaxSOC: ${currentMaxSOC}%`);
+  // log(`Current period: ${newPeriod} - ${tariffConfig.description}`);
+  // log(`SOC: ${currentSOC}%, Min: ${tariffConfig.minSOC}%, Active: ${tariffConfig.activeSOC}%, Max: ${tariffConfig.maxSOC}%`);
+  // log(`Grid: ${gridPower}W, Solar: ${solarPower}W, Battery: ${currentPower}W, Load: ${loadPower}W`);
+  // log(`Current ESS Mode: ${currentMode}, Current Inverter Mode: ${currentInverterMode}, Current MinSOC: ${currentMinSOC}%, Current ActiveSOC: ${currentActiveSOC}%, Current MaxSOC: ${currentMaxSOC}%`);
   
   let needsModeChange = false;
   let needsSetpointChange = false;
@@ -494,10 +605,64 @@ async function applyTariffStrategy() {
         setActiveSOC(tariffConfig.activeSOC);
         needsActiveSOCChange = true;
       }
+      
+      // Handle charging logic
+      if (tariffConfig.targetSOC && currentSOC < tariffConfig.targetSOC) {
+        // Start charge session if not already active
+        if (!currentChargeSessionId) {
+          await startChargeSession(tariffConfig.targetSOC, '02:00', '05:00');
+        }
+        
+        if (currentMode !== tariffConfig.essMode) {
+          const oldMode = currentMode;
+          setESSMode(tariffConfig.essMode);
+          needsModeChange = true;
+          await logChargeEvent('charging_start', `Started charging: ESS mode ${oldMode} -> ${tariffConfig.essMode}`, {
+            essModeBefore: oldMode,
+            essModeAfter: tariffConfig.essMode,
+            inChargingWindow: true,
+            shouldCharge: true,
+            isCharging: true,
+            chargeSessionId: currentChargeSessionId
+          });
+        }
+        if (currentGridSetpoint !== tariffConfig.gridSetpoint) {
+          setGridSetpoint(tariffConfig.gridSetpoint);
+          needsSetpointChange = true;
+        }
+        // log(`Night charging: SOC ${currentSOC}% < target ${tariffConfig.targetSOC}%`);
+      } else if (tariffConfig.targetSOC && currentSOC >= tariffConfig.targetSOC) {
+        // Day/Evening: End any active charge session (outside charging window)
+        if (currentChargeSessionId) {
+          await endChargeSession('window_ended');
+        }
+        
+        if (currentMode !== tariffConfig.essMode) {
+          setESSMode(tariffConfig.essMode);
+          needsModeChange = true;
+        }
+        // log(`Night target reached: SOC ${currentSOC}% >= ${tariffConfig.targetSOC}%`);
+        await logChargeEvent('target_reached', `Night charging target reached: ${currentSOC}% >= ${tariffConfig.targetSOC}%`, {
+          inChargingWindow: true,
+          shouldCharge: false,
+          isCharging: false
+        });
+      } else {
+        // No target SOC, just set ESS mode
+        if (currentMode !== tariffConfig.essMode) {
+          setESSMode(tariffConfig.essMode);
+          needsModeChange = true;
+        }
+      }
       break;
       
     case 'Day':
     case 'Evening':
+      // Day/Evening: End any active charge session (outside charging window)
+      if (currentChargeSessionId) {
+        await endChargeSession('window_ended');
+      }
+      
       // Day/Evening: Use database-configured inverter mode
       setInverterMode(tariffConfig.inverterMode);
       if (currentMinSOC !== tariffConfig.minSOC) {
@@ -526,27 +691,94 @@ async function applyTariffStrategy() {
       break;
       
     case 'PEAK':
-      // Peak: Use database-configured inverter mode
-      setInverterMode(tariffConfig.inverterMode);
-      if (currentMinSOC !== tariffConfig.minSOC) {
-        setMinSOC(tariffConfig.minSOC);
-        needsMinSOCChange = true;
-      }
-      if (currentMaxSOC !== tariffConfig.maxSOC) {
-        setMaxSOC(tariffConfig.maxSOC);
-        needsMaxSOCChange = true;
-      }
-      if (currentActiveSOC !== tariffConfig.activeSOC) {
-        setActiveSOC(tariffConfig.activeSOC);
-        needsActiveSOCChange = true;
-      }
-      if (currentMode !== tariffConfig.essMode) {
-        setESSMode(tariffConfig.essMode);
-        needsModeChange = true;
-      }
-      if (currentGridSetpoint !== tariffConfig.gridSetpoint) {
-        setGridSetpoint(tariffConfig.gridSetpoint);
-        needsSetpointChange = true;
+      // Peak: Check if SOC <= active SOC, if so switch to evening behavior immediately
+      if (currentSOC <= tariffConfig.activeSOC) {
+        log(`PEAK: SOC ${currentSOC}% <= active SOC ${tariffConfig.activeSOC}%, switching to evening behavior`);
+        
+        // Get evening tariff configuration
+        const eveningConfig = TARIFF['Evening'];
+        if (eveningConfig) {
+          // Apply evening configuration immediately
+          setInverterMode(eveningConfig.inverterMode);
+          if (currentMinSOC !== eveningConfig.minSOC) {
+            setMinSOC(eveningConfig.minSOC);
+            needsMinSOCChange = true;
+          }
+          if (currentMaxSOC !== eveningConfig.maxSOC) {
+            setMaxSOC(eveningConfig.maxSOC);
+            needsMaxSOCChange = true;
+          }
+          if (currentActiveSOC !== eveningConfig.activeSOC) {
+            setActiveSOC(eveningConfig.activeSOC);
+            needsActiveSOCChange = true;
+          }
+          if (currentMode !== eveningConfig.essMode) {
+            setESSMode(eveningConfig.essMode);
+            needsModeChange = true;
+          }
+          if (currentGridSetpoint !== eveningConfig.gridSetpoint) {
+            setGridSetpoint(eveningConfig.gridSetpoint);
+            needsSetpointChange = true;
+          }
+          
+          // Log the early switch to evening behavior
+          await logTariffEvent('early_evening_switch', `PEAK period: SOC ${currentSOC}% <= active SOC ${tariffConfig.activeSOC}%, switched to evening behavior`);
+          await logChargeEvent('peak_soc_threshold', `PEAK: Early switch to evening behavior due to low SOC`, {
+            inChargingWindow: false,
+            shouldCharge: false,
+            isCharging: false
+          });
+          
+          log(`PEAK: Applied evening configuration due to low SOC - ESS: ${eveningConfig.essMode}, Setpoint: ${eveningConfig.gridSetpoint}W`);
+        } else {
+          log(`PEAK: Evening configuration not found, using PEAK configuration`, "WARN");
+          // Fallback to normal PEAK behavior
+          setInverterMode(tariffConfig.inverterMode);
+          if (currentMinSOC !== tariffConfig.minSOC) {
+            setMinSOC(tariffConfig.minSOC);
+            needsMinSOCChange = true;
+          }
+          if (currentMaxSOC !== tariffConfig.maxSOC) {
+            setMaxSOC(tariffConfig.maxSOC);
+            needsMaxSOCChange = true;
+          }
+          if (currentActiveSOC !== tariffConfig.activeSOC) {
+            setActiveSOC(tariffConfig.activeSOC);
+            needsActiveSOCChange = true;
+          }
+          if (currentMode !== tariffConfig.essMode) {
+            setESSMode(tariffConfig.essMode);
+            needsModeChange = true;
+          }
+          if (currentGridSetpoint !== tariffConfig.gridSetpoint) {
+            setGridSetpoint(tariffConfig.gridSetpoint);
+            needsSetpointChange = true;
+          }
+        }
+      } else {
+        // Normal PEAK behavior when SOC > active SOC
+        log(`PEAK: SOC ${currentSOC}% > active SOC ${tariffConfig.activeSOC}%, using normal PEAK behavior`);
+        setInverterMode(tariffConfig.inverterMode);
+        if (currentMinSOC !== tariffConfig.minSOC) {
+          setMinSOC(tariffConfig.minSOC);
+          needsMinSOCChange = true;
+        }
+        if (currentMaxSOC !== tariffConfig.maxSOC) {
+          setMaxSOC(tariffConfig.maxSOC);
+          needsMaxSOCChange = true;
+        }
+        if (currentActiveSOC !== tariffConfig.activeSOC) {
+          setActiveSOC(tariffConfig.activeSOC);
+          needsActiveSOCChange = true;
+        }
+        if (currentMode !== tariffConfig.essMode) {
+          setESSMode(tariffConfig.essMode);
+          needsModeChange = true;
+        }
+        if (currentGridSetpoint !== tariffConfig.gridSetpoint) {
+          setGridSetpoint(tariffConfig.gridSetpoint);
+          needsSetpointChange = true;
+        }
       }
       
       // No feedback needed in peak; set strong export target
@@ -586,9 +818,10 @@ function connectMQTT() {
     mqttClient.subscribe(topics, (err) => {
       if (err) {
         log(`Error subscribing to topics: ${err.message}`, "ERROR");
-      } else {
-        log(`Subscribed to ${topics.length} monitoring topics`);
-      }
+      } 
+      // else {
+      //   log(`Subscribed to ${topics.length} monitoring topics`);
+      // }
     });
   });
 

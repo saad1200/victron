@@ -10,6 +10,15 @@ module.exports = {
       }
     },
     {
+      name: 'victron.monitoring',
+      cwd: __dirname,
+      script: './src/victron.monitoring.js',
+      interpreter: 'node',
+      env: {
+        NODE_ENV: 'production'
+      }
+    },
+    {
       name: 'victron.controller',
       cwd: __dirname,
       script: './src/victron.controller.js',

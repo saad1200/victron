@@ -328,6 +328,62 @@
             </div>
         </div>
 
+        <!-- Daily Targets & Performance Panel -->
+        <div class="chart-card" style="margin-bottom: 30px; background: linear-gradient(135deg, #f8fafc, #e2e8f0); border: 2px solid #3b82f6; box-shadow: 0 8px 25px rgba(59, 130, 246, 0.15);">
+            <h3 style="color: #1e40af; font-size: 1.4rem; margin-bottom: 20px;">🎯 Daily Performance Targets</h3>
+            <div style="padding: 20px;">
+                <!-- Key Metrics Row -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px;">
+                    <div class="savings-card" style="background: linear-gradient(135deg, #fef3c7, #fde68a); border-radius: 12px; padding: 20px; border-left: 4px solid #f59e0b;">
+                        <h4 style="color: #92400e; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Battery Arbitrage Profit</h4>
+                        <div class="stat-value positive" id="batteryArbitrageProfit" style="font-size: 1.8rem; font-weight: 700; white-space: nowrap;">£0.00</div>
+                        <div style="font-size: 0.75rem; color: #92400e; margin-top: 5px;" id="batteryArbitrageProfitBreakdown">£0.00 peak export - £0.00 night import</div>
+                    </div>
+                    <div class="savings-card" style="background: linear-gradient(135deg, #dcfce7, #bbf7d0); border-radius: 12px; padding: 20px; border-left: 4px solid #10b981;">
+                        <h4 style="color: #065f46; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Solar &amp; Battery Savings</h4>
+                        <div class="stat-value positive" id="solarBatterySavings" style="font-size: 1.8rem; font-weight: 700; white-space: nowrap;">£0.00</div>
+                        <div style="font-size: 0.75rem; color: #065f46; margin-top: 5px;" id="solarBatterySavingsBreakdown">0.00 kWh solar + 0.00 kWh battery × £0.34</div>
+                    </div>
+                    <div class="savings-card" style="background: linear-gradient(135deg, #fef2f2, #fee2e2); border-radius: 12px; padding: 20px; border-left: 4px solid #ef4444;">
+                        <h4 style="color: #991b1b; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Total Grid Import Cost</h4>
+                        <div class="stat-value negative" id="totalGridImportCost" style="font-size: 1.8rem; font-weight: 700; white-space: nowrap;">£0.00</div>
+                        <div style="font-size: 0.75rem; color: #991b1b; margin-top: 5px;"><span id="totalGridImportKwh">0.00 kWh</span> @ time-based tariff rates</div>
+                    </div>
+                    <div class="savings-card" style="background: linear-gradient(135deg, #dbeafe, #bfdbfe); border-radius: 12px; padding: 20px; border-left: 4px solid #3b82f6;">
+                        <h4 style="color: #1e40af; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Net Daily Savings</h4>
+                        <div class="stat-value" id="totalDailySavings" style="font-size: 1.8rem; font-weight: 700; white-space: nowrap;">£0.00</div>
+                        <div style="font-size: 0.75rem; color: #1e40af; margin-top: 5px;" id="totalDailySavingsBreakdown">£0.00 + £0.00 - £0.00</div>
+                    </div>
+                </div>
+
+                <!-- Target vs Actual -->
+                <div style="margin-bottom: 25px;">
+                    <h4 style="color: #374151; margin-bottom: 15px; font-size: 1.1rem; font-weight: 600;">📊 Target Performance</h4>
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 20px;">
+                        <div class="savings-card" style="border-radius: 12px; padding: 20px;" id="targetPerformanceCard">
+                            <h4 style="margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Target Achievement</h4>
+                            <div style="font-size: 1.8rem; font-weight: 700;" id="targetPercentage">0%</div>
+                            <div style="font-size: 0.75rem; margin-top: 5px;" id="targetStatus">Below Target</div>
+                            <div style="font-size: 0.75rem; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.1);" id="targetCalculation">£0.00 of £7.00 target</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 7-Day Breakdown -->
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: #374151; margin-bottom: 15px; font-size: 1.1rem; font-weight: 600;">📅 7-Day Performance Breakdown</h4>
+                    <div id="dailyBreakdownGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+
+                <div style="background: rgba(59, 130, 246, 0.1); border-radius: 8px; padding: 15px; font-size: 0.9rem; color: #1e40af;">
+                    <strong>Net Daily Savings Formula:</strong> Solar & Battery Savings (£0.34/kWh) + Battery Arbitrage Profit - Total Grid Import Cost
+                    <br><small>Daily target: £7.00 | Grid import costs calculated using accurate time-based tariff periods from victron_tariff_periods | Green = 100%+ target | Orange/Red = Below target</small>
+                </div>
+            </div>
+        </div>
+
         <div class="stats-grid" id="statsGrid">
             <div class="loading">
                 <div class="spinner"></div>
@@ -335,22 +391,87 @@
             </div>
         </div>
 
+        <!-- Battery Management Panel -->
         <div class="chart-card" style="margin-bottom: 30px;">
-            <h3>💰 Self-Consumption Savings & Tariff Breakdown</h3>
+            <h3>🔋 Battery Performance & Economics</h3>
+            <div style="padding: 20px;">
+                <div class="battery-summary">
+                    <!-- Battery Usage -->
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="color: #374151; margin-bottom: 15px; font-size: 1rem; font-weight: 600;">⚡ Battery Usage</h4>
+                        <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+                            <div class="savings-card" style="background: linear-gradient(135deg, #fef3c7, #fde68a); border-radius: 12px; padding: 20px; border-left: 4px solid #f59e0b;">
+                                <h4 style="color: #92400e; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Battery Discharge Used</h4>
+                                <div class="stat-value positive" id="batteryDischargeUsed" style="font-size: 1.8rem; font-weight: 700;">0.00 kWh</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Charging Sources -->
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="color: #374151; margin-bottom: 15px; font-size: 1rem; font-weight: 600;">🔌 Charging Sources</h4>
+                        <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+                            <div class="savings-card" style="background: linear-gradient(135deg, #f0f9ff, #e0f2fe); border-radius: 12px; padding: 20px; border-left: 4px solid #0ea5e9;">
+                                <h4 style="color: #0c4a6e; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Charged from Solar</h4>
+                                <div class="stat-value positive" id="batteryChargedFromSolar" style="font-size: 1.8rem; font-weight: 700;">0.00 kWh</div>
+                            </div>
+                            <div class="savings-card" style="background: linear-gradient(135deg, #f3e8ff, #e9d5ff); border-radius: 12px; padding: 20px; border-left: 4px solid #8b5cf6;">
+                                <h4 style="color: #5b21b6; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Charged from Grid</h4>
+                                <div class="stat-value neutral" id="batteryChargedFromGrid" style="font-size: 1.8rem; font-weight: 700;">0.00 kWh</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Financial Impact -->
+                    <div style="margin-bottom: 20px;">
+                        <h4 style="color: #374151; margin-bottom: 15px; font-size: 1rem; font-weight: 600;">💰 Financial Impact</h4>
+                        <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+                            <div class="savings-card" style="background: linear-gradient(135deg, #fef2f2, #fee2e2); border-radius: 12px; padding: 20px; border-left: 4px solid #ef4444;">
+                                <h4 style="color: #991b1b; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Grid Charging Cost</h4>
+                                <div class="stat-value negative" id="gridChargingCost" style="font-size: 1.8rem; font-weight: 700;">£0.00</div>
+                            </div>
+                            <div class="savings-card" style="background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-radius: 12px; padding: 20px; border-left: 4px solid #22c55e;">
+                                <h4 style="color: #14532d; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Grid-to-Peak Profit</h4>
+                                <div class="stat-value positive" id="gridToPeakProfit" style="font-size: 1.8rem; font-weight: 700;">£0.00</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="background: rgba(139, 92, 246, 0.1); border-radius: 8px; padding: 15px; font-size: 0.9rem; color: #5b21b6; margin-bottom: 20px;">
+                        <strong>Battery Charging Info:</strong> Grid charging occurs during night hours (02:00-05:00) at 16.61p/kWh
+                        <br><small>Solar charging is free during daylight. Grid-to-Peak profit shows potential earnings if grid-charged energy is sold during peak hours (16:00-19:00) at 29.79p/kWh</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-card" style="margin-bottom: 30px;">
+            <h3>💰 Energy Savings & Efficiency</h3>
             <div style="padding: 20px;">
                 <div class="savings-summary">
-                    <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px;">
-                        <div class="savings-card" style="background: linear-gradient(135deg, #f0f9ff, #e0f2fe); border-radius: 12px; padding: 20px; border-left: 4px solid #0ea5e9;">
-                            <h4 style="color: #0c4a6e; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Total Self-Consumed</h4>
-                            <div class="stat-value positive" id="selfConsumedEnergy" style="font-size: 1.8rem; font-weight: 700;">0.00 kWh</div>
+                    <!-- Self-Consumption Metrics -->
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="color: #374151; margin-bottom: 15px; font-size: 1rem; font-weight: 600;">🏠 Self-Consumption</h4>
+                        <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+                            <div class="savings-card" style="background: linear-gradient(135deg, #f0f9ff, #e0f2fe); border-radius: 12px; padding: 20px; border-left: 4px solid #0ea5e9;">
+                                <h4 style="color: #0c4a6e; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Solar Direct Use</h4>
+                                <div class="stat-value positive" id="solarDirectUse" style="font-size: 1.8rem; font-weight: 700;">0.00 kWh</div>
+                            </div>
+                            <div class="savings-card" style="background: linear-gradient(135deg, #fefce8, #fef3c7); border-radius: 12px; padding: 20px; border-left: 4px solid #eab308;">
+                                <h4 style="color: #713f12; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Self-Consumption Rate</h4>
+                                <div class="stat-value neutral" id="selfConsumptionRate" style="font-size: 1.8rem; font-weight: 700;">0%</div>
+                            </div>
                         </div>
-                        <div class="savings-card" style="background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-radius: 12px; padding: 20px; border-left: 4px solid #22c55e;">
-                            <h4 style="color: #14532d; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Grid Cost Avoided</h4>
-                            <div class="stat-value positive" id="gridCostAvoided" style="font-size: 1.8rem; font-weight: 700;">£0.00</div>
-                        </div>
-                        <div class="savings-card" style="background: linear-gradient(135deg, #fefce8, #fef3c7); border-radius: 12px; padding: 20px; border-left: 4px solid #eab308;">
-                            <h4 style="color: #713f12; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Self-Consumption Rate</h4>
-                            <div class="stat-value neutral" id="selfConsumptionRate" style="font-size: 1.8rem; font-weight: 700;">0%</div>
+                    </div>
+
+                    <!-- Financial Savings -->
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="color: #374151; margin-bottom: 15px; font-size: 1rem; font-weight: 600;">💸 Cost Savings</h4>
+                        <div class="savings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+                            <div class="savings-card" style="background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-radius: 12px; padding: 20px; border-left: 4px solid #22c55e;">
+                                <h4 style="color: #14532d; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px;">Total Grid Cost Avoided</h4>
+                                <div class="stat-value positive" id="gridCostAvoided" style="font-size: 1.8rem; font-weight: 700;">£0.00</div>
+                            </div>
                         </div>
                     </div>
                     

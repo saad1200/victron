@@ -1,10 +1,11 @@
 #!/bin/bash
 # Enhanced setup with auto-restart capability
 pm2 delete victron.collection 2>/dev/null || true
-pm2 delete victron.controller 2>/dev/null || true
+pm2 delete victron.controller 2>/dev/null || 
+pm2 delete victron.monitoring 2>/dev/null || true
 
 ## Start all apps via PM2 ecosystem (ensures consistent names and options)
-pm2 start ecosystem.config.js --only victron.collection,victron.controller,dashboard.api --restart-delay=3000
+pm2 start ecosystem.config.js --only victron.collection,victron.controller,victron.monitoring,dashboard.api --restart-delay=3000
 
 # Save PM2 configuration
 pm2 save

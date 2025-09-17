@@ -112,7 +112,15 @@ class SolarDashboard {
         // Calculate self-consumption savings
         this.calculateSelfConsumptionSavings(summary, this.currentData?.tariffBreakdown);
         
+        // Reorganized widgets by logical grouping
         const stats = [
+            // Energy Generation & Flow
+            {
+                title: 'Solar Generation',
+                value: summary.totalSolar?.toFixed(2) || '0.00',
+                unit: 'kWh',
+                class: 'positive'
+            },
             {
                 title: 'Total Energy Import',
                 value: summary.totalImport?.toFixed(2) || '0.00',
@@ -125,29 +133,33 @@ class SolarDashboard {
                 unit: 'kWh',
                 class: 'positive'
             },
-            {
-                title: 'Solar Generation',
-                value: summary.totalSolar?.toFixed(2) || '0.00',
-                unit: 'kWh',
-                class: 'positive'
-            },
+            
+            // Financial Performance
             {
                 title: 'Import Cost',
-                value: `$${(totalCost / 100)?.toFixed(2) || '0.00'}`,
+                value: `£${(totalCost / 100)?.toFixed(2) || '0.00'}`,
                 unit: '',
                 class: 'negative'
             },
             {
                 title: 'Export Earnings',
-                value: `$${(totalEarnings / 100)?.toFixed(2) || '0.00'}`,
+                value: `£${(totalEarnings / 100)?.toFixed(2) || '0.00'}`,
                 unit: '',
                 class: 'positive'
             },
             {
                 title: 'Net Profit/Loss',
-                value: `$${(netProfit / 100)?.toFixed(2) || '0.00'}`,
+                value: `£${(netProfit / 100)?.toFixed(2) || '0.00'}`,
                 unit: '',
                 class: netProfit >= 0 ? 'positive' : 'negative'
+            },
+            
+            // System Efficiency
+            {
+                title: 'Self Consumption Rate',
+                value: summary.selfConsumption?.toFixed(1) || '0.0',
+                unit: '%',
+                class: 'positive'
             },
             {
                 title: 'Battery Efficiency',
@@ -156,9 +168,9 @@ class SolarDashboard {
                 class: 'neutral'
             },
             {
-                title: 'Self Consumption',
-                value: summary.selfConsumption?.toFixed(1) || '0.0',
-                unit: '%',
+                title: 'Total Savings',
+                value: (summary.selfConsumedSavings / 100)?.toFixed(2) || '0.00',
+                unit: '£',
                 class: 'positive'
             }
         ];
@@ -166,8 +178,7 @@ class SolarDashboard {
         statsGrid.innerHTML = stats.map(stat => `
             <div class="stat-card">
                 <h3>${stat.title}</h3>
-                <div class="stat-value ${stat.class}">${stat.value}</div>
-                <div class="stat-unit">${stat.unit}</div>
+                <div class="stat-value ${stat.class}">${stat.value}<span class="stat-unit">${stat.unit}</span></div>
             </div>
         `).join('');
     }
@@ -180,6 +191,7 @@ class SolarDashboard {
         console.log('PV Arrays data from API:', data.tariffBreakdown?.pvArrays);
         this.updatePvArraysChart(data.tariffBreakdown?.pvArrays || []);
         SolarDashboard.updateArrayGenerationChart(data.tariffBreakdown?.pvArrays || []);
+        this.calculateSelfConsumptionSavings(data.summary, data.tariffBreakdown);
     }
 
     renderEnergyChart(timeSeries) {
@@ -802,22 +814,58 @@ class SolarDashboard {
             totalSavings = daySavings + nightSavings;
         }
         
-        // Update the main UI elements
-        const selfConsumedElement = document.getElementById('selfConsumedEnergy');
+        // Update the main UI elements with new field names and data from API
+        const solarDirectUseElement = document.getElementById('solarDirectUse');
+        const batteryDischargeUsedElement = document.getElementById('batteryDischargeUsed');
         const gridCostAvoidedElement = document.getElementById('gridCostAvoided');
         const selfConsumptionRateElement = document.getElementById('selfConsumptionRate');
         
-        if (selfConsumedElement) {
-            selfConsumedElement.textContent = `${selfConsumedEnergy.toFixed(2)} kWh`;
+        // Update battery panel elements
+        const batteryChargedFromSolarElement = document.getElementById('batteryChargedFromSolar');
+        const batteryChargedFromGridElement = document.getElementById('batteryChargedFromGrid');
+        const gridChargingCostElement = document.getElementById('gridChargingCost');
+        const gridToPeakProfitElement = document.getElementById('gridToPeakProfit');
+        
+        if (solarDirectUseElement && tariffBreakdown) {
+            solarDirectUseElement.textContent = `${tariffBreakdown.directSolarConsumption?.toFixed(2) || '0.00'} kWh`;
         }
         
-        if (gridCostAvoidedElement) {
-            gridCostAvoidedElement.textContent = `£${totalSavings.toFixed(2)}`;
+        if (batteryDischargeUsedElement && tariffBreakdown) {
+            batteryDischargeUsedElement.textContent = `${tariffBreakdown.batteryConsumption?.toFixed(2) || '0.00'} kWh`;
         }
         
-        if (selfConsumptionRateElement) {
-            selfConsumptionRateElement.textContent = `${selfConsumptionRate.toFixed(1)}%`;
+        if (gridCostAvoidedElement && tariffBreakdown) {
+            const savings = tariffBreakdown.selfConsumedSavings || 0;
+            gridCostAvoidedElement.textContent = `£${(savings / 100).toFixed(2)}`;
         }
+        
+        if (selfConsumptionRateElement && summary) {
+            const rate = summary.selfConsumption || 0;
+            selfConsumptionRateElement.textContent = `${rate.toFixed(1)}%`;
+        }
+        
+        if (batteryChargedFromSolarElement && tariffBreakdown) {
+            const solarCharged = tariffBreakdown.batteryChargedFromSolar || 0;
+            batteryChargedFromSolarElement.textContent = `${solarCharged.toFixed(2)} kWh`;
+        }
+        
+        if (batteryChargedFromGridElement && tariffBreakdown) {
+            const gridCharged = tariffBreakdown.batteryChargedFromGrid || 0;
+            batteryChargedFromGridElement.textContent = `${gridCharged.toFixed(2)} kWh`;
+        }
+        
+        if (gridChargingCostElement && tariffBreakdown) {
+            const cost = tariffBreakdown.gridChargingCost || 0;
+            gridChargingCostElement.textContent = `£${(cost / 100).toFixed(2)}`;
+        }
+        
+        if (gridToPeakProfitElement && tariffBreakdown) {
+            const profit = tariffBreakdown.gridToPeakProfit || 0;
+            gridToPeakProfitElement.textContent = `£${(profit / 100).toFixed(2)}`;
+        }
+
+        // Update daily targets panel
+        this.updateDailyTargets(tariffBreakdown);
         
         // Update detailed period breakdown
         this.updateTariffPeriodBreakdown(periodBreakdowns);
@@ -860,6 +908,158 @@ class SolarDashboard {
                             <strong>Net Profit:</strong> <span style="color: ${period.profit >= 0 ? '#059669' : '#dc2626'};">£${period.profit.toFixed(2)}</span>
                         </div>
                     </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    updateDailyTargets(tariffBreakdown) {
+        if (!tariffBreakdown) return;
+
+        const DAILY_TARGET = 700; // £7.00 in pence
+
+        // Update main target metrics
+        const batteryArbitrageProfitElement = document.getElementById('batteryArbitrageProfit');
+        const solarBatterySavingsElement = document.getElementById('solarBatterySavings');
+        const totalDailySavingsElement = document.getElementById('totalDailySavings');
+        const targetPercentageElement = document.getElementById('targetPercentage');
+        const targetStatusElement = document.getElementById('targetStatus');
+        const targetPerformanceCard = document.getElementById('targetPerformanceCard');
+
+        // Update main target metrics including grid import cost widget
+        const totalGridImportKwhElement = document.getElementById('totalGridImportKwh');
+        const totalGridImportCostElement = document.getElementById('totalGridImportCost');
+
+        if (batteryArbitrageProfitElement && tariffBreakdown.batteryArbitrageProfit !== undefined) {
+            const profit = tariffBreakdown.batteryArbitrageProfit || 0;
+            const peakExportEarnings = tariffBreakdown.peakExportEarnings || 0;
+            const nightImportCost = tariffBreakdown.nightImportCost || 0;
+            
+            batteryArbitrageProfitElement.textContent = `£${(profit / 100).toFixed(2)}`;
+            
+            // Update breakdown display
+            const breakdownElement = document.getElementById('batteryArbitrageProfitBreakdown');
+            if (breakdownElement) {
+                breakdownElement.textContent = `£${(peakExportEarnings / 100).toFixed(2)} peak export - £${(nightImportCost / 100).toFixed(2)} night import`;
+            }
+        }
+
+        if (solarBatterySavingsElement && tariffBreakdown.solarBatterySavings !== undefined) {
+            const savings = tariffBreakdown.solarBatterySavings || 0;
+            const solarDirect = tariffBreakdown.directSolarConsumption || 0;
+            const batteryDischarge = tariffBreakdown.batteryConsumption || 0;
+            
+            solarBatterySavingsElement.textContent = `£${(savings / 100).toFixed(2)}`;
+            
+            // Update breakdown display
+            const breakdownElement = document.getElementById('solarBatterySavingsBreakdown');
+            if (breakdownElement) {
+                breakdownElement.textContent = `${solarDirect.toFixed(2)} kWh solar + ${batteryDischarge.toFixed(2)} kWh battery × £0.34`;
+            }
+        }
+
+        if (totalGridImportKwhElement && tariffBreakdown.totalGridImportKwh !== undefined) {
+            const importKwh = tariffBreakdown.totalGridImportKwh || 0;
+            totalGridImportKwhElement.textContent = `${importKwh.toFixed(2)} kWh`;
+        }
+
+        if (totalGridImportCostElement && tariffBreakdown.totalGridImportCost !== undefined) {
+            const importCost = tariffBreakdown.totalGridImportCost || 0;
+            totalGridImportCostElement.textContent = `£${(importCost / 100).toFixed(2)}`;
+        }
+
+        if (totalDailySavingsElement && tariffBreakdown.totalDailySavings !== undefined) {
+            const totalSavings = tariffBreakdown.totalDailySavings || 0;
+            const solarBatterySavings = tariffBreakdown.solarBatterySavings || 0;
+            const arbitrageProfit = tariffBreakdown.batteryArbitrageProfit || 0;
+            const importCost = tariffBreakdown.totalGridImportCost || 0;
+            
+            totalDailySavingsElement.textContent = `£${(totalSavings / 100).toFixed(2)}`;
+            
+            // Update breakdown calculation display
+            const breakdownElement = document.getElementById('totalDailySavingsBreakdown');
+            if (breakdownElement) {
+                breakdownElement.textContent = `£${(solarBatterySavings / 100).toFixed(2)} + £${(arbitrageProfit / 100).toFixed(2)} - £${(importCost / 100).toFixed(2)}`;
+            }
+            
+            // Update color based on positive/negative savings
+            if (totalSavings >= 0) {
+                totalDailySavingsElement.className = 'stat-value positive';
+            } else {
+                totalDailySavingsElement.className = 'stat-value negative';
+            }
+
+            // Calculate target percentage
+            const targetPercentage = (totalSavings / DAILY_TARGET) * 100;
+            
+            if (targetPercentageElement) {
+                targetPercentageElement.textContent = `${targetPercentage.toFixed(1)}%`;
+            }
+
+            // Update target calculation display
+            const targetCalculationElement = document.getElementById('targetCalculation');
+            if (targetCalculationElement) {
+                targetCalculationElement.textContent = `£${(totalSavings / 100).toFixed(2)} of £7.00 target`;
+            }
+
+            // Update target status and card styling
+            if (targetStatusElement && targetPerformanceCard) {
+                if (targetPercentage >= 100) {
+                    targetStatusElement.textContent = 'Target Achieved! 🎉';
+                    targetPerformanceCard.style.background = 'linear-gradient(135deg, #dcfce7, #bbf7d0)';
+                    targetPerformanceCard.style.borderLeft = '4px solid #10b981';
+                    targetPercentageElement.style.color = '#065f46';
+                    targetStatusElement.style.color = '#065f46';
+                } else if (targetPercentage >= 80) {
+                    targetStatusElement.textContent = 'Close to Target';
+                    targetPerformanceCard.style.background = 'linear-gradient(135deg, #fef3c7, #fde68a)';
+                    targetPerformanceCard.style.borderLeft = '4px solid #f59e0b';
+                    targetPercentageElement.style.color = '#92400e';
+                    targetStatusElement.style.color = '#92400e';
+                } else {
+                    targetStatusElement.textContent = 'Below Target';
+                    targetPerformanceCard.style.background = 'linear-gradient(135deg, #fee2e2, #fecaca)';
+                    targetPerformanceCard.style.borderLeft = '4px solid #ef4444';
+                    targetPercentageElement.style.color = '#991b1b';
+                    targetStatusElement.style.color = '#991b1b';
+                }
+            }
+        }
+
+        // Update 7-day breakdown
+        this.updateDailyBreakdown(tariffBreakdown.dailyBreakdown || []);
+    }
+
+    updateDailyBreakdown(dailyBreakdown) {
+        const dailyBreakdownGrid = document.getElementById('dailyBreakdownGrid');
+        if (!dailyBreakdownGrid || !dailyBreakdown.length) return;
+
+        const last7Days = dailyBreakdown.slice(-7); // Get last 7 days
+
+        dailyBreakdownGrid.innerHTML = last7Days.map(day => {
+            const date = new Date(day.date);
+            const dayName = date.toLocaleDateString('en-GB', { weekday: 'short' });
+            const dayDate = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+            const percentage = day.targetPercentage || 0;
+            
+            let cardStyle, textColor;
+            if (percentage >= 100) {
+                cardStyle = 'background: linear-gradient(135deg, #dcfce7, #bbf7d0); border-left: 4px solid #10b981;';
+                textColor = '#065f46';
+            } else if (percentage >= 80) {
+                cardStyle = 'background: linear-gradient(135deg, #fef3c7, #fde68a); border-left: 4px solid #f59e0b;';
+                textColor = '#92400e';
+            } else {
+                cardStyle = 'background: linear-gradient(135deg, #fee2e2, #fecaca); border-left: 4px solid #ef4444;';
+                textColor = '#991b1b';
+            }
+
+            return `
+                <div class="savings-card" style="${cardStyle} border-radius: 8px; padding: 12px; text-align: center;">
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;">${dayName}</div>
+                    <div style="font-size: 0.7rem; color: #6b7280; margin-bottom: 8px;">${dayDate}</div>
+                    <div style="font-size: 1.2rem; font-weight: 700; color: ${textColor};">${percentage.toFixed(0)}%</div>
+                    <div style="font-size: 0.65rem; color: ${textColor}; margin-top: 4px;">£${(day.totalSavings / 100).toFixed(2)}</div>
                 </div>
             `;
         }).join('');
