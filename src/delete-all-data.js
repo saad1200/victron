@@ -25,23 +25,23 @@ const DB_CONFIG = {
 // List of data tables (excluding configuration tables used by controller)
 const VICTRON_TABLES = [
   'victron_battery_data',
-  'victron_battery_snapshots',
-  'victron_charge_events',
-  'victron_charge_sessions',
-  'victron_energy_tracking',
-  'victron_grid_data',
-  'victron_inverter_data',
-  'victron_metrics',
   'victron_pv_data',
   'victron_pv_arrays',
+  'victron_grid_data',
+  'victron_inverter_data',
   'victron_system_events',
-  'victron_tariff_events'
+  'victron_ev_data',
+  'victron_ev_events',
+  'victron_ev_sessions',
+  'victron_energy_tracking',
+  'victron_tariff_events',
 ];
 
-// Configuration tables excluded (used by controller for input/configuration):
-// - victron_charge_config
-// - victron_grid_setpoints  
+// Configuration tables excluded (kept for controller):
+// - victron_grid_setpoints
 // - victron_tariff_periods
+// - victron_strategy_decisions
+// - products
 
 // Logging function
 function log(message, level = "INFO") {

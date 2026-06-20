@@ -1,7 +1,8 @@
 -- Products Migration Script
--- This script adds the products table and updates existing tables to support multiple tariff products
+-- Idempotent — safe to re-run on an existing database.
+-- Adds product support to tariff and setpoint tables.
+-- Usage: psql -d victron -f db/products-migration.sql
 
--- Create products table
 CREATE TABLE IF NOT EXISTS products (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
@@ -10,23 +11,20 @@ CREATE TABLE IF NOT EXISTS products (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Insert the two products
+-- Seed products
 INSERT INTO products (name, active) VALUES
 ('Octopus Flux', true),
 ('Octopus Agile', false)
-ON CONFLICT (name) DO UPDATE SET
-    active = EXCLUDED.active,
-    updated_at = CURRENT_TIMESTAMP;
+ON CONFLICT (name) DO NOTHING;
 
--- Add product_id column to victron_tariff_periods
+-- Add product_id column to related tables
 ALTER TABLE victron_tariff_periods 
 ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id);
 
--- Add product_id column to victron_grid_setpoints
 ALTER TABLE victron_grid_setpoints 
 ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id);
 
--- Update existing records to use Octopus Flux product_id
+-- Back-fill existing rows that have no product_id
 UPDATE victron_tariff_periods 
 SET product_id = (SELECT id FROM products WHERE name = 'Octopus Flux')
 WHERE product_id IS NULL;
@@ -35,13 +33,13 @@ UPDATE victron_grid_setpoints
 SET product_id = (SELECT id FROM products WHERE name = 'Octopus Flux')
 WHERE product_id IS NULL;
 
--- Create indexes for performance
+-- Indexes
 CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
 CREATE INDEX IF NOT EXISTS idx_tariff_periods_product ON victron_tariff_periods(product_id);
 CREATE INDEX IF NOT EXISTS idx_grid_setpoints_product ON victron_grid_setpoints(product_id);
 
--- Update the views to include product information
-DROP VIEW IF EXISTS v_daily_energy_summary;
+-- Update view to include product name
+DROP VIEW IF EXISTS v_daily_energy_summary CASCADE;
 CREATE OR REPLACE VIEW v_daily_energy_summary AS
 SELECT 
     et.device_id,
@@ -62,23 +60,5 @@ LEFT JOIN products p ON tp.product_id = p.id
 GROUP BY et.device_id, DATE(et.tracking_timestamp), et.tariff_period, p.name
 ORDER BY date DESC, et.tariff_period;
 
--- Add comments for documentation
 COMMENT ON TABLE products IS 'Energy tariff products (e.g., Octopus Flux, Octopus Agile)';
 COMMENT ON COLUMN products.active IS 'Only one product should be active at a time';
-
--- Display the products
-SELECT 'Products created:' as message;
-SELECT id, name, active, created_at FROM products ORDER BY id;
-
--- Display updated table structures
-SELECT 'Updated victron_tariff_periods with product_id:' as message;
-SELECT tp.id, tp.period_name, p.name as product_name, tp.is_active 
-FROM victron_tariff_periods tp 
-LEFT JOIN products p ON tp.product_id = p.id 
-ORDER BY tp.id;
-
-SELECT 'Updated victron_grid_setpoints with product_id:' as message;
-SELECT gs.id, gs.tariff_period, p.name as product_name, gs.is_active 
-FROM victron_grid_setpoints gs 
-LEFT JOIN products p ON gs.product_id = p.id 
-ORDER BY gs.id;

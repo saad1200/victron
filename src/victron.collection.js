@@ -1,7 +1,15 @@
 /**
  * Victron MQTT Data Collector
- * Pure data collection - receives MQTT messages and inserts immediately to database
- * No calculations or logic - just raw data storage
+ *
+ * Collects MQTT messages and buffers them in memory. Every FLUSH_INTERVAL_MS
+ * (default 30 s) it writes averaged values to the database — one row per table
+ * per interval. This reduces DB inserts from millions/day to ~2,880/day per table.
+ *
+ * Previous design:  every MQTT message → immediate DB insert → ~4-5M rows/day
+ * New design:       buffer in memory → flush averages every 30s → ~90K rows/day
+ *
+ * victron_metrics table is NO LONGER written to (it duplicated the specific tables).
+ * System events (vebus_error) are still written immediately.
  */
 
 const mqtt = require("mqtt");
@@ -14,6 +22,7 @@ require("dotenv").config();
 const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://192.168.9.226";
 const DEVICE_ID = process.env.DEVICE_ID || "c0619ab786e2";
 const EV_CHARGER_INSTANCE = process.env.EV_CHARGER_INSTANCE || '0';
+const FLUSH_INTERVAL_MS = parseInt(process.env.COLLECTION_INTERVAL_MS) || 30000; // 30 seconds
 
 // Database configuration
 const DB_CONFIG = {
@@ -106,114 +115,169 @@ async function log(message, level = "INFO") {
   }
 }
 
-// ---------------- Database Functions ----------------
-async function insertMetric(deviceId, category, metric, value, unit, topic) {
-  try {
-    const query = `
-      INSERT INTO victron_metrics (device_id, metric_type, metric_name, value, unit, raw_topic, timestamp)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
-    `;
-    await dbClient.query(query, [deviceId, category, metric, value, unit, topic]);
-  } catch (err) {
-    log(`Failed to insert metric ${category}.${metric}: ${err.message}`, "ERROR");
+// ---------------- Buffer ----------------
+// Accumulate readings; flush() computes average and writes one row per table.
+
+const buffer = {
+  battery: { soc: [], voltage: [], current: [], power: [] },
+  pv:      { power: [], voltage: [], current: [] },
+  pvArrays: {}, // keyed by arrayId: { power: [], voltage: [] }
+  grid:    { power_l1: [], power_l2: [], power_l3: [], voltage_l1: [], frequency: [] },
+  inverter:{ power: [], voltage: [], current: [] },
+  ev:      { power: [], current: [], energy: [], status: [] },
+};
+
+let msgCount = 0; // messages received since last flush
+
+function bufferValue(arr, value) {
+  if (value !== null && value !== undefined && !isNaN(value)) {
+    arr.push(value);
   }
 }
 
-// Real-time data insertion functions
-async function insertBatteryDataPoint(soc, voltage, current, power, timestamp) {
-  try {
-    const query = `
-      INSERT INTO victron_battery_data (timestamp, device_id, soc, voltage, current, power)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (timestamp, device_id) DO UPDATE SET
-        soc = COALESCE(EXCLUDED.soc, victron_battery_data.soc),
-        voltage = COALESCE(EXCLUDED.voltage, victron_battery_data.voltage),
-        current = COALESCE(EXCLUDED.current, victron_battery_data.current),
-        power = COALESCE(EXCLUDED.power, victron_battery_data.power)
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, soc, voltage, current, power]);
-  } catch (err) {
-    log(`Error inserting battery data: ${err.message}`, "ERROR");
-  }
+function avg(arr) {
+  if (!arr || arr.length === 0) return null;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
-async function insertPvDataPoint(power, voltage, current, timestamp) {
-  try {
-    const query = `
-      INSERT INTO victron_pv_data (timestamp, device_id, power, voltage, current)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (timestamp, device_id) DO UPDATE SET
-        power = EXCLUDED.power,
-        voltage = EXCLUDED.voltage,
-        current = EXCLUDED.current
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, power, voltage, current]);
-  } catch (err) {
-    log(`Error inserting PV data: ${err.message}`, "ERROR");
-  }
+function last(arr) {
+  if (!arr || arr.length === 0) return null;
+  return arr[arr.length - 1];
 }
 
-async function insertPvArrayDataPoint(arrayId, power, voltage, timestamp) {
-  try {
-    const query = `
-      INSERT INTO victron_pv_arrays (timestamp, device_id, array_id, power_watts, voltage_volts)
-      VALUES ($1, $2, $3, $4, $5)
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, arrayId, power, voltage]);
-  } catch (err) {
-    log(`Error inserting PV array data: ${err.message}`, "ERROR");
-  }
+function resetBuffer() {
+  buffer.battery = { soc: [], voltage: [], current: [], power: [] };
+  buffer.pv      = { power: [], voltage: [], current: [] };
+  buffer.pvArrays = {};
+  buffer.grid    = { power_l1: [], power_l2: [], power_l3: [], voltage_l1: [], frequency: [] };
+  buffer.inverter = { power: [], voltage: [], current: [] };
+  buffer.ev      = { power: [], current: [], energy: [], status: [] };
+  msgCount = 0;
 }
 
-async function insertGridDataPoint(power_l1, power_l2, power_l3, voltage_l1, voltage_l2, voltage_l3, timestamp) {
-  try {
-    // Only insert columns that exist in the current schema
-    const query = `
-      INSERT INTO victron_grid_data (timestamp, device_id, power_l1, power_l2, power_l3, voltage_l1, frequency)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, power_l1, power_l2, power_l3, voltage_l1, null]);
-  } catch (err) {
-    log(`Error inserting grid data: ${err.message}`, "ERROR");
-  }
-}
+// ---------------- Flush (write averages to DB) ----------------
 
-async function insertInverterDataPoint(power, voltage, current, timestamp) {
-  try {
-    const query = `
-      INSERT INTO victron_inverter_data (timestamp, device_id, power, voltage, current)
-      VALUES ($1, $2, $3, $4, $5)
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, power, voltage, current]);
-  } catch (err) {
-    log(`Error inserting inverter data: ${err.message}`, "ERROR");
-  }
-}
+async function flushBuffer() {
+  if (isShuttingDown) return;
+  if (msgCount === 0) return; // nothing received
 
-async function insertEVDataPoint(power, current, energy, status, timestamp) {
+  const timestamp = new Date();
+  const flushed = msgCount;
+  let inserts = 0;
+
   try {
-    const query = `
-      INSERT INTO victron_ev_data (timestamp, device_id, power_watts, current_amps, energy_kwh, status)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await dbClient.query(query, [timestamp, DEVICE_ID, power, current, energy, status]);
-  } catch (err) {
-    // Table may not exist yet — non-critical, silently skip
-    if (!err.message.includes('does not exist')) {
-      log(`Error inserting EV data: ${err.message}`, "ERROR");
+    // Battery
+    const batSoc = avg(buffer.battery.soc);
+    const batVolt = avg(buffer.battery.voltage);
+    const batCur = avg(buffer.battery.current);
+    const batPow = avg(buffer.battery.power);
+    if (batSoc !== null || batVolt !== null || batCur !== null || batPow !== null) {
+      await dbClient.query(`
+        INSERT INTO victron_battery_data (timestamp, device_id, soc, voltage, current, power)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (timestamp, device_id) DO UPDATE SET
+          soc = COALESCE(EXCLUDED.soc, victron_battery_data.soc),
+          voltage = COALESCE(EXCLUDED.voltage, victron_battery_data.voltage),
+          current = COALESCE(EXCLUDED.current, victron_battery_data.current),
+          power = COALESCE(EXCLUDED.power, victron_battery_data.power)
+      `, [timestamp, DEVICE_ID, batSoc, batVolt, batCur, batPow]);
+      inserts++;
     }
+
+    // PV total
+    const pvPow = avg(buffer.pv.power);
+    const pvVolt = avg(buffer.pv.voltage);
+    const pvCur = avg(buffer.pv.current);
+    if (pvPow !== null || pvVolt !== null || pvCur !== null) {
+      await dbClient.query(`
+        INSERT INTO victron_pv_data (timestamp, device_id, power, voltage, current)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (timestamp, device_id) DO UPDATE SET
+          power = COALESCE(EXCLUDED.power, victron_pv_data.power),
+          voltage = COALESCE(EXCLUDED.voltage, victron_pv_data.voltage),
+          current = COALESCE(EXCLUDED.current, victron_pv_data.current)
+      `, [timestamp, DEVICE_ID, pvPow, pvVolt, pvCur]);
+      inserts++;
+    }
+
+    // PV arrays
+    for (const [arrayId, data] of Object.entries(buffer.pvArrays)) {
+      const arrPow = avg(data.power);
+      const arrVolt = avg(data.voltage);
+      if (arrPow !== null || arrVolt !== null) {
+        await dbClient.query(`
+          INSERT INTO victron_pv_arrays (timestamp, device_id, array_id, power_watts, voltage_volts)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT DO NOTHING
+        `, [timestamp, DEVICE_ID, parseInt(arrayId), arrPow, arrVolt]);
+        inserts++;
+      }
+    }
+
+    // Grid
+    const gL1 = avg(buffer.grid.power_l1);
+    const gL2 = avg(buffer.grid.power_l2);
+    const gL3 = avg(buffer.grid.power_l3);
+    const gV1 = avg(buffer.grid.voltage_l1);
+    const gFreq = avg(buffer.grid.frequency);
+    if (gL1 !== null || gL2 !== null || gL3 !== null) {
+      await dbClient.query(`
+        INSERT INTO victron_grid_data (timestamp, device_id, power_l1, power_l2, power_l3, voltage_l1, frequency)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [timestamp, DEVICE_ID, gL1, gL2, gL3, gV1, gFreq]);
+      inserts++;
+    }
+
+    // Inverter
+    const invPow = avg(buffer.inverter.power);
+    const invVolt = avg(buffer.inverter.voltage);
+    const invCur = avg(buffer.inverter.current);
+    if (invPow !== null || invVolt !== null || invCur !== null) {
+      await dbClient.query(`
+        INSERT INTO victron_inverter_data (timestamp, device_id, power, voltage, current)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [timestamp, DEVICE_ID, invPow, invVolt, invCur]);
+      inserts++;
+    }
+
+    // EV charger
+    const evPow = avg(buffer.ev.power);
+    const evCur = avg(buffer.ev.current);
+    const evEnergy = last(buffer.ev.energy);   // cumulative — use last, not avg
+    const evStatus = last(buffer.ev.status);
+    if (evPow !== null || evCur !== null || evEnergy !== null) {
+      try {
+        await dbClient.query(`
+          INSERT INTO victron_ev_data (timestamp, device_id, power_watts, current_amps, energy_kwh, status)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [timestamp, DEVICE_ID, evPow, evCur, evEnergy, evStatus]);
+        inserts++;
+      } catch (err) {
+        if (!err.message.includes('does not exist')) {
+          log(`Error flushing EV data: ${err.message}`, "ERROR");
+        }
+      }
+    }
+
+  } catch (err) {
+    log(`Error flushing buffer: ${err.message}`, "ERROR");
   }
+
+  if (inserts > 0) {
+    log(`Flushed ${inserts} rows (${flushed} msgs buffered in ${FLUSH_INTERVAL_MS/1000}s)`, "DEBUG");
+  }
+
+  resetBuffer();
 }
+
+// ---------------- Immediate inserts (rare events only) ----------------
 
 async function insertSystemEvent(event, value, timestamp) {
   try {
-    const query = `
+    await dbClient.query(`
       INSERT INTO victron_system_events (timestamp, device_id, event_type, event_value, description)
       VALUES ($1, $2, $3, $4, $5)
-    `;
-    const description = `${event} = ${value}`;
-    await dbClient.query(query, [timestamp, DEVICE_ID, event, value, description]);
-    // log(`Inserted system event: ${description}`, "DEBUG");
+    `, [timestamp, DEVICE_ID, event, value, `${event} = ${value}`]);
   } catch (err) {
     log(`Error inserting system event: ${err.message}`, "ERROR");
   }
@@ -241,8 +305,6 @@ function setupMQTT() {
       mqttClient.subscribe(topic, (err) => {
         if (err) {
           log(`Failed to subscribe to ${topic}: ${err.message}`, "ERROR");
-        } else {
-          // log(`Subscribed to ${topic}`, "DEBUG");
         }
       });
     });
@@ -254,162 +316,68 @@ function setupMQTT() {
     if (isShuttingDown) return;
     
     try {
-      // log(`Received message on ${topic}: ${message.toString()}`, "DEBUG");
       const data = JSON.parse(message.toString());
       
       if (typeof data.value !== "number" || data.value === null || isNaN(data.value)) {
-        // log(`Invalid data on ${topic}: ${message.toString()}`, "WARN");
         return;
       }
 
       const value = data.value;
-      const timestamp = new Date();
-      // log(`Processing ${topic}: ${value}`, "DEBUG");
+      msgCount++;
 
-      // Process different metric types - insert immediately to database
+      // Buffer values — no DB writes here (except system events)
       switch (topic) {
-        // Battery metrics
-        case MQTT_TOPICS.BATTERY_SOC:
-          await insertMetric(DEVICE_ID, "battery", "soc", value, "%", topic);
-          await insertBatteryDataPoint(value, null, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.BATTERY_VOLTAGE:
-          await insertMetric(DEVICE_ID, "battery", "voltage", value, "V", topic);
-          await insertBatteryDataPoint(null, value, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.BATTERY_CURRENT:
-          await insertMetric(DEVICE_ID, "battery", "current", value, "A", topic);
-          await insertBatteryDataPoint(null, null, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.BATTERY_POWER:
-          await insertMetric(DEVICE_ID, "battery", "power", value, "W", topic);
-          await insertBatteryDataPoint(null, null, null, value, timestamp);
-          break;
+        // Battery
+        case MQTT_TOPICS.BATTERY_SOC:     bufferValue(buffer.battery.soc, value); break;
+        case MQTT_TOPICS.BATTERY_VOLTAGE: bufferValue(buffer.battery.voltage, value); break;
+        case MQTT_TOPICS.BATTERY_CURRENT: bufferValue(buffer.battery.current, value); break;
+        case MQTT_TOPICS.BATTERY_POWER:   bufferValue(buffer.battery.power, value); break;
 
-        // PV metrics
-        case MQTT_TOPICS.PV_POWER:
-          await insertMetric(DEVICE_ID, "pv", "power", value, "W", topic);
-          await insertPvDataPoint(value, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_VOLTAGE:
-          await insertMetric(DEVICE_ID, "pv", "voltage", value, "V", topic);
-          await insertPvDataPoint(null, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_CURRENT:
-          await insertMetric(DEVICE_ID, "pv", "current", value, "A", topic);
-          await insertPvDataPoint(null, null, value, timestamp);
-          break;
+        // PV total
+        case MQTT_TOPICS.PV_POWER:   bufferValue(buffer.pv.power, value); break;
+        case MQTT_TOPICS.PV_VOLTAGE: bufferValue(buffer.pv.voltage, value); break;
+        case MQTT_TOPICS.PV_CURRENT: bufferValue(buffer.pv.current, value); break;
 
-        // PV Array power readings
-        case MQTT_TOPICS.PV_ARRAY_0_POWER:
-          await insertPvArrayDataPoint(0, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_0_VOLTAGE:
-          await insertPvArrayDataPoint(0, null, value, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_1_POWER:
-          await insertPvArrayDataPoint(1, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_1_VOLTAGE:
-          await insertPvArrayDataPoint(1, null, value, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_2_POWER:
-          await insertPvArrayDataPoint(2, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_2_VOLTAGE:
-          await insertPvArrayDataPoint(2, null, value, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_3_POWER:
-          await insertPvArrayDataPoint(3, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.PV_ARRAY_3_VOLTAGE:
-          await insertPvArrayDataPoint(3, null, value, timestamp);
-          break;
+        // PV arrays
+        case MQTT_TOPICS.PV_ARRAY_0_POWER:   buffer.pvArrays[0] = buffer.pvArrays[0] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[0].power, value); break;
+        case MQTT_TOPICS.PV_ARRAY_0_VOLTAGE: buffer.pvArrays[0] = buffer.pvArrays[0] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[0].voltage, value); break;
+        case MQTT_TOPICS.PV_ARRAY_1_POWER:   buffer.pvArrays[1] = buffer.pvArrays[1] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[1].power, value); break;
+        case MQTT_TOPICS.PV_ARRAY_1_VOLTAGE: buffer.pvArrays[1] = buffer.pvArrays[1] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[1].voltage, value); break;
+        case MQTT_TOPICS.PV_ARRAY_2_POWER:   buffer.pvArrays[2] = buffer.pvArrays[2] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[2].power, value); break;
+        case MQTT_TOPICS.PV_ARRAY_2_VOLTAGE: buffer.pvArrays[2] = buffer.pvArrays[2] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[2].voltage, value); break;
+        case MQTT_TOPICS.PV_ARRAY_3_POWER:   buffer.pvArrays[3] = buffer.pvArrays[3] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[3].power, value); break;
+        case MQTT_TOPICS.PV_ARRAY_3_VOLTAGE: buffer.pvArrays[3] = buffer.pvArrays[3] || { power: [], voltage: [] }; bufferValue(buffer.pvArrays[3].voltage, value); break;
 
-        // Grid metrics
-        case MQTT_TOPICS.GRID_POWER_L1:
-          await insertMetric(DEVICE_ID, "grid", "power_l1", value, "W", topic);
-          await insertGridDataPoint(value, null, null, null, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.GRID_POWER_L2:
-          await insertMetric(DEVICE_ID, "grid", "power_l2", value, "W", topic);
-          await insertGridDataPoint(null, value, null, null, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.GRID_POWER_L3:
-          await insertMetric(DEVICE_ID, "grid", "power_l3", value, "W", topic);
-          await insertGridDataPoint(null, null, value, null, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.GRID_VOLTAGE_L1:
-          await insertMetric(DEVICE_ID, "grid", "voltage_l1", value, "V", topic);
-          await insertGridDataPoint(null, null, null, value, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.GRID_FREQUENCY:
-          await insertMetric(DEVICE_ID, "grid", "frequency", value, "Hz", topic);
-          break;
+        // Grid
+        case MQTT_TOPICS.GRID_POWER_L1:  bufferValue(buffer.grid.power_l1, value); break;
+        case MQTT_TOPICS.GRID_POWER_L2:  bufferValue(buffer.grid.power_l2, value); break;
+        case MQTT_TOPICS.GRID_POWER_L3:  bufferValue(buffer.grid.power_l3, value); break;
+        case MQTT_TOPICS.GRID_VOLTAGE_L1:bufferValue(buffer.grid.voltage_l1, value); break;
+        case MQTT_TOPICS.GRID_FREQUENCY: bufferValue(buffer.grid.frequency, value); break;
 
-        // Inverter metrics
-        case MQTT_TOPICS.INVERTER_POWER:
-          await insertMetric(DEVICE_ID, "inverter", "power", value, "W", topic);
-          await insertInverterDataPoint(value, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.INVERTER_VOLTAGE:
-          await insertMetric(DEVICE_ID, "inverter", "voltage", value, "V", topic);
-          await insertInverterDataPoint(null, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.INVERTER_CURRENT:
-          await insertMetric(DEVICE_ID, "inverter", "current", value, "A", topic);
-          await insertInverterDataPoint(null, null, value, timestamp);
-          break;
+        // Inverter
+        case MQTT_TOPICS.INVERTER_POWER:  bufferValue(buffer.inverter.power, value); break;
+        case MQTT_TOPICS.INVERTER_VOLTAGE:bufferValue(buffer.inverter.voltage, value); break;
+        case MQTT_TOPICS.INVERTER_CURRENT:bufferValue(buffer.inverter.current, value); break;
 
-        // System events
+        // System events — immediate insert (rare)
         case MQTT_TOPICS.VEBUS_ERROR:
-          await insertMetric(DEVICE_ID, "system", "vebus_error", value, "", topic);
-          await insertSystemEvent("vebus_error", value, timestamp);
+          await insertSystemEvent("vebus_error", value, new Date());
           break;
 
-        // EV Charger metrics
-        case MQTT_TOPICS.EV_STATUS:
-          await insertMetric(DEVICE_ID, "evcharger", "status", value, "", topic);
-          break;
-        case MQTT_TOPICS.EV_MODE:
-          await insertMetric(DEVICE_ID, "evcharger", "mode", value, "", topic);
-          break;
-        case MQTT_TOPICS.EV_POWER:
-          await insertMetric(DEVICE_ID, "evcharger", "power", value, "W", topic);
-          await insertEVDataPoint(value, null, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.EV_POWER_L1:
-          await insertMetric(DEVICE_ID, "evcharger", "power_l1", value, "W", topic);
-          break;
-        case MQTT_TOPICS.EV_POWER_L2:
-          await insertMetric(DEVICE_ID, "evcharger", "power_l2", value, "W", topic);
-          break;
-        case MQTT_TOPICS.EV_POWER_L3:
-          await insertMetric(DEVICE_ID, "evcharger", "power_l3", value, "W", topic);
-          break;
-        case MQTT_TOPICS.EV_CURRENT:
-          await insertMetric(DEVICE_ID, "evcharger", "current", value, "A", topic);
-          await insertEVDataPoint(null, value, null, null, timestamp);
-          break;
-        case MQTT_TOPICS.EV_MAX_CURRENT:
-          await insertMetric(DEVICE_ID, "evcharger", "max_current", value, "A", topic);
-          break;
-        case MQTT_TOPICS.EV_SET_CURRENT:
-          await insertMetric(DEVICE_ID, "evcharger", "set_current", value, "A", topic);
-          break;
-        case MQTT_TOPICS.EV_ENERGY:
-          await insertMetric(DEVICE_ID, "evcharger", "energy", value, "kWh", topic);
-          await insertEVDataPoint(null, null, value, null, timestamp);
-          break;
-        case MQTT_TOPICS.EV_CHARGING_TIME:
-          await insertMetric(DEVICE_ID, "evcharger", "charging_time", value, "s", topic);
-          break;
-        case MQTT_TOPICS.EV_START_STOP:
-          await insertMetric(DEVICE_ID, "evcharger", "start_stop", value, "", topic);
-          break;
-
-        // default:
-          // log(`Unhandled topic: ${topic}`, "DEBUG");
+        // EV Charger
+        case MQTT_TOPICS.EV_POWER:   bufferValue(buffer.ev.power, value); break;
+        case MQTT_TOPICS.EV_CURRENT: bufferValue(buffer.ev.current, value); break;
+        case MQTT_TOPICS.EV_ENERGY:  bufferValue(buffer.ev.energy, value); break;
+        case MQTT_TOPICS.EV_STATUS:  bufferValue(buffer.ev.status, value); break;
+        case MQTT_TOPICS.EV_POWER_L1: break; // covered by EV_POWER total
+        case MQTT_TOPICS.EV_POWER_L2: break;
+        case MQTT_TOPICS.EV_POWER_L3: break;
+        case MQTT_TOPICS.EV_MODE:           break; // metadata, not needed in time-series
+        case MQTT_TOPICS.EV_MAX_CURRENT:    break;
+        case MQTT_TOPICS.EV_SET_CURRENT:    break;
+        case MQTT_TOPICS.EV_CHARGING_TIME:  break;
+        case MQTT_TOPICS.EV_START_STOP:     break;
       }
 
     } catch (err) {
@@ -425,6 +393,9 @@ function setupMQTT() {
 async function gracefulShutdown() {
   log("Shutting down data collector...");
   isShuttingDown = true;
+  
+  // Flush any remaining buffered data
+  await flushBuffer();
   
   if (mqttClient) {
     mqttClient.end();
@@ -443,10 +414,17 @@ process.on('SIGTERM', gracefulShutdown);
 
 // ---------------- Startup ----------------
 async function startup() {
-  log("Starting Victron MQTT Data Collector");
+  log("Starting Victron MQTT Data Collector (buffered)");
+  log(`Flush interval: ${FLUSH_INTERVAL_MS/1000}s`);
   await connectDatabase();
   setupMQTT();
-  log("Data collector ready - collecting all MQTT messages in real-time");
+
+  // Periodic flush
+  setInterval(() => {
+    flushBuffer().catch(err => log(`Flush error: ${err.message}`, "ERROR"));
+  }, FLUSH_INTERVAL_MS);
+
+  log("Data collector ready — buffering MQTT, flushing averages to DB");
 }
 
 startup().catch(err => {

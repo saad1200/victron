@@ -1,37 +1,25 @@
 -- Strategy Advisor Schema
--- Stores daily AI-generated charging decisions based on solar forecast + battery state
+-- Idempotent — safe to re-run on an existing database.
+-- Usage: psql -d victron -f db/strategy-advisor-schema.sql
 
 CREATE TABLE IF NOT EXISTS victron_strategy_decisions (
     id SERIAL PRIMARY KEY,
-    decision_date DATE NOT NULL,                          -- which night this decision applies to
-    action VARCHAR(30) NOT NULL,                          -- 'skip_night_charge', 'partial_charge', 'full_charge'
-    target_soc INTEGER,                                   -- target SOC % (null = default / N/A)
-    confidence VARCHAR(10) DEFAULT 'medium',              -- 'high', 'medium', 'low'
-
-    -- Input data snapshot
-    solar_forecast_kwh DECIMAL(8,2),                      -- tomorrow's forecast solar yield
-    battery_soc DECIMAL(5,2),                             -- SOC at time of decision
-    battery_capacity_kwh DECIMAL(8,2),                    -- estimated usable battery capacity
-    avg_daily_consumption_kwh DECIMAL(8,2),               -- recent avg daily consumption
-    avg_daily_solar_kwh DECIMAL(8,2),                     -- recent avg daily solar yield
-    import_rate_cheap_pence DECIMAL(6,2),                 -- Flux night import rate
-    export_rate_peak_pence DECIMAL(6,2),                  -- Flux peak export rate
-
-    -- Historical performance (actual data from recent days)
-    avg_peak_export_kwh DECIMAL(8,2),                     -- avg actual export during peak (16-19)
-    avg_peak_earnings_pence DECIMAL(10,2),                -- avg actual earnings during peak
-    avg_night_import_kwh DECIMAL(8,2),                    -- avg actual import during night charge
-    avg_night_cost_pence DECIMAL(10,2),                   -- avg actual cost of night charging
-    system_efficiency_pct DECIMAL(5,2),                   -- round-trip efficiency (export/import ratio)
-
-    -- AI analysis
-    reasoning TEXT,                                        -- LLM explanation
-    model VARCHAR(50),                                     -- e.g. 'gpt-4o-mini', 'gemini-2.0-flash'
+    decision_date DATE NOT NULL,
+    action VARCHAR(30) NOT NULL,
+    target_soc INTEGER,
+    confidence VARCHAR(10) DEFAULT 'medium',
+    solar_forecast_kwh DECIMAL(8,2),
+    battery_soc DECIMAL(5,2),
+    battery_capacity_kwh DECIMAL(8,2),
+    avg_daily_consumption_kwh DECIMAL(8,2),
+    avg_daily_solar_kwh DECIMAL(8,2),
+    import_rate_cheap_pence DECIMAL(6,2),
+    export_rate_peak_pence DECIMAL(6,2),
+    reasoning TEXT,
+    model VARCHAR(50),
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
-
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(decision_date)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_strategy_decisions_date
@@ -40,22 +28,46 @@ CREATE INDEX IF NOT EXISTS idx_strategy_decisions_date
 -- Hourly solar forecast snapshots (saved with each decision)
 CREATE TABLE IF NOT EXISTS victron_solar_forecasts (
     id SERIAL PRIMARY KEY,
-    forecast_date DATE NOT NULL,                           -- which day the forecast is for
-    hour_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,      -- specific hour
-    forecast_kwh DECIMAL(8,4),                             -- expected kWh for that hour
+    forecast_date DATE NOT NULL,
+    hour_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+    forecast_kwh DECIMAL(8,4),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_solar_forecasts_date
     ON victron_solar_forecasts(forecast_date DESC);
 
--- View: latest decision
+-- ═══════════════════════════════════════════════════════════════════════
+-- Migration: add constraints and columns to existing tables
+-- ═══════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_strategy_decisions_decision_date_key'
+  ) THEN
+    ALTER TABLE victron_strategy_decisions
+      ADD CONSTRAINT victron_strategy_decisions_decision_date_key UNIQUE (decision_date);
+  END IF;
+END $$;
+
+-- Columns added after initial release (historical performance data)
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_peak_export_kwh DECIMAL(8,2);
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_peak_earnings_pence DECIMAL(10,2);
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_night_import_kwh DECIMAL(8,2);
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_night_cost_pence DECIMAL(10,2);
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS system_efficiency_pct DECIMAL(5,2);
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Views
+-- ═══════════════════════════════════════════════════════════════════════
+
+DROP VIEW IF EXISTS v_latest_strategy_decision CASCADE;
 CREATE OR REPLACE VIEW v_latest_strategy_decision AS
 SELECT * FROM victron_strategy_decisions
 ORDER BY decision_date DESC
 LIMIT 1;
 
--- View: decision accuracy — compare forecast vs actual solar yield
+DROP VIEW IF EXISTS v_decision_accuracy CASCADE;
 CREATE OR REPLACE VIEW v_decision_accuracy AS
 SELECT
     d.decision_date,

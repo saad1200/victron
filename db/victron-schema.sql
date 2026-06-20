@@ -1,26 +1,12 @@
 -- Victron Database Schema
 -- Run this SQL script manually to create the required database tables
 -- Usage: psql -d victron -f victron-schema.sql
+--
+-- Data is written every 30s (buffered averages from MQTT).
+-- Raw data is auto-purged after DATA_RETENTION_DAYS (default 90).
+-- Energy tracking (5-min aggregates) and strategy decisions are kept forever.
 
--- Main metrics table for all individual measurements
-CREATE TABLE IF NOT EXISTS victron_metrics (
-    id SERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ DEFAULT NOW(),
-    device_id VARCHAR(50) NOT NULL,
-    metric_type VARCHAR(100) NOT NULL,
-    metric_name VARCHAR(100) NOT NULL,
-    value NUMERIC(10,3),
-    unit VARCHAR(20),
-    raw_topic VARCHAR(255)
-);
-
--- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_victron_metrics_timestamp ON victron_metrics(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_metrics_device_id ON victron_metrics(device_id);
-CREATE INDEX IF NOT EXISTS idx_victron_metrics_type ON victron_metrics(metric_type);
-CREATE INDEX IF NOT EXISTS idx_victron_metrics_name ON victron_metrics(metric_name);
-
--- Battery data table for structured battery metrics
+-- Battery data table
 CREATE TABLE IF NOT EXISTS victron_battery_data (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ DEFAULT NOW(),
@@ -28,24 +14,37 @@ CREATE TABLE IF NOT EXISTS victron_battery_data (
     soc NUMERIC(5,2),
     voltage NUMERIC(6,3),
     current NUMERIC(8,3),
-    power NUMERIC(8,3)
+    power NUMERIC(8,3),
+    UNIQUE (timestamp, device_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_victron_battery_timestamp ON victron_battery_data(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_battery_device_id ON victron_battery_data(device_id);
 
--- Solar PV data table
+-- Solar PV data table (system total)
 CREATE TABLE IF NOT EXISTS victron_pv_data (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ DEFAULT NOW(),
     device_id VARCHAR(50) NOT NULL,
     power NUMERIC(8,3),
     voltage NUMERIC(6,3),
-    current NUMERIC(8,3)
+    current NUMERIC(8,3),
+    UNIQUE (timestamp, device_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_victron_pv_timestamp ON victron_pv_data(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_pv_device_id ON victron_pv_data(device_id);
+
+-- Individual PV array tracking
+CREATE TABLE IF NOT EXISTS victron_pv_arrays (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    device_id VARCHAR(50) NOT NULL,
+    array_id INTEGER NOT NULL,
+    power_watts NUMERIC(8,3),
+    voltage_volts NUMERIC(6,3),
+    UNIQUE (timestamp, device_id, array_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_victron_pv_arrays_timestamp ON victron_pv_arrays(timestamp);
 
 -- Grid data table
 CREATE TABLE IF NOT EXISTS victron_grid_data (
@@ -56,11 +55,11 @@ CREATE TABLE IF NOT EXISTS victron_grid_data (
     power_l2 NUMERIC(8,3),
     power_l3 NUMERIC(8,3),
     voltage_l1 NUMERIC(6,3),
-    frequency NUMERIC(5,2)
+    frequency NUMERIC(5,2),
+    UNIQUE (timestamp, device_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_victron_grid_timestamp ON victron_grid_data(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_grid_device_id ON victron_grid_data(device_id);
 
 -- Inverter data table
 CREATE TABLE IF NOT EXISTS victron_inverter_data (
@@ -69,13 +68,13 @@ CREATE TABLE IF NOT EXISTS victron_inverter_data (
     device_id VARCHAR(50) NOT NULL,
     power NUMERIC(8,3),
     voltage NUMERIC(6,3),
-    current NUMERIC(8,3)
+    current NUMERIC(8,3),
+    UNIQUE (timestamp, device_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_victron_inverter_timestamp ON victron_inverter_data(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_inverter_device_id ON victron_inverter_data(device_id);
 
--- System events table for tracking system state changes
+-- System events table (rare — only vebus errors etc.)
 CREATE TABLE IF NOT EXISTS victron_system_events (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ DEFAULT NOW(),
@@ -86,13 +85,76 @@ CREATE TABLE IF NOT EXISTS victron_system_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_victron_events_timestamp ON victron_system_events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_victron_events_device_id ON victron_system_events(device_id);
-CREATE INDEX IF NOT EXISTS idx_victron_events_type ON victron_system_events(event_type);
 
--- Display table information
-SELECT 'victron_metrics' as table_name UNION ALL
-SELECT 'victron_battery_data' UNION ALL
-SELECT 'victron_pv_data' UNION ALL
-SELECT 'victron_grid_data' UNION ALL
-SELECT 'victron_inverter_data' UNION ALL
-SELECT 'victron_system_events';
+-- ═══════════════════════════════════════════════════════════════════════
+-- Migration: add UNIQUE constraints to existing tables
+-- Safe to re-run — uses DO blocks to skip if constraint already exists.
+-- ═══════════════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_battery_data_timestamp_device_key'
+  ) THEN
+    ALTER TABLE victron_battery_data
+      ADD CONSTRAINT victron_battery_data_timestamp_device_key UNIQUE (timestamp, device_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_pv_data_timestamp_device_key'
+  ) THEN
+    ALTER TABLE victron_pv_data
+      ADD CONSTRAINT victron_pv_data_timestamp_device_key UNIQUE (timestamp, device_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_pv_arrays_timestamp_device_array_key'
+  ) THEN
+    ALTER TABLE victron_pv_arrays
+      ADD CONSTRAINT victron_pv_arrays_timestamp_device_array_key UNIQUE (timestamp, device_id, array_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_grid_data_timestamp_device_key'
+  ) THEN
+    ALTER TABLE victron_grid_data
+      ADD CONSTRAINT victron_grid_data_timestamp_device_key UNIQUE (timestamp, device_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_inverter_data_timestamp_device_key'
+  ) THEN
+    ALTER TABLE victron_inverter_data
+      ADD CONSTRAINT victron_inverter_data_timestamp_device_key UNIQUE (timestamp, device_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_energy_tracking_timestamp_device_key'
+  ) THEN
+    ALTER TABLE victron_energy_tracking
+      ADD CONSTRAINT victron_energy_tracking_timestamp_device_key UNIQUE (tracking_timestamp, device_id);
+  END IF;
+END $$;
+
+-- Drop redundant per-column indexes now covered by unique constraints
+DROP INDEX IF EXISTS idx_victron_battery_device_id;
+DROP INDEX IF EXISTS idx_victron_pv_device_id;
+DROP INDEX IF EXISTS idx_victron_grid_device_id;
+DROP INDEX IF EXISTS idx_victron_inverter_device_id;
+DROP INDEX IF EXISTS idx_victron_events_device_id;
+DROP INDEX IF EXISTS idx_victron_events_type;
+DROP INDEX IF EXISTS idx_victron_metrics_timestamp;
+DROP INDEX IF EXISTS idx_victron_metrics_device_id;
+DROP INDEX IF EXISTS idx_victron_metrics_type;
+DROP INDEX IF EXISTS idx_victron_metrics_name;
+DROP INDEX IF EXISTS idx_victron_pv_arrays_device_id;
+DROP INDEX IF EXISTS idx_victron_pv_arrays_array_id;

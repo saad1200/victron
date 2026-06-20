@@ -291,9 +291,62 @@ async function monitorSystemHealth() {
   }
 }
 
+// ---------------- Data Retention ────────────────────────────────────
+// Purge raw high-frequency data older than RETENTION_DAYS (default 90).
+// Energy tracking (5-min aggregates) and strategy decisions are kept forever.
+
+const RETENTION_DAYS = parseInt(process.env.DATA_RETENTION_DAYS) || 90;
+let lastRetentionRun = 0; // epoch ms of last successful run
+
+async function enforceRetention() {
+  try {
+    const cutoff = `${RETENTION_DAYS} days`;
+    // table → timestamp column name
+    const tables = {
+      'victron_battery_data':   'timestamp',
+      'victron_pv_data':        'timestamp',
+      'victron_pv_arrays':      'timestamp',
+      'victron_grid_data':      'timestamp',
+      'victron_inverter_data':  'timestamp',
+      'victron_ev_data':        'timestamp',
+      'victron_ev_events':      'event_timestamp',
+      'victron_system_events':  'timestamp',
+    };
+
+    let totalDeleted = 0;
+    for (const [table, tsCol] of Object.entries(tables)) {
+      try {
+        const result = await dbClient.query(
+          `DELETE FROM ${table} WHERE ${tsCol} < NOW() - INTERVAL '${cutoff}'`
+        );
+        if (result.rowCount > 0) {
+          log(`Retention: deleted ${result.rowCount} rows from ${table} (>${RETENTION_DAYS}d old)`);
+          totalDeleted += result.rowCount;
+        }
+      } catch (err) {
+        // Table may not exist — skip silently
+        if (!err.message.includes('does not exist')) {
+          log(`Retention error on ${table}: ${err.message}`, 'WARN');
+        }
+      }
+    }
+
+    if (totalDeleted > 0) {
+      log(`Retention complete: ${totalDeleted} total rows purged (>${RETENTION_DAYS} days)`);
+    } else {
+      log(`Retention check: nothing to purge (keeping ${RETENTION_DAYS} days)`);
+    }
+
+    lastRetentionRun = Date.now();
+  } catch (error) {
+    log(`Retention policy error: ${error.message}`, 'ERROR');
+  }
+}
+
 // ---------------- Startup and Intervals ----------------
 async function startup() {
   log("Starting Victron Monitoring Service");
+  log(`Data retention: ${RETENTION_DAYS} days`);
   await connectDatabase();
   await getCurrentTariffPeriod();
   log("Monitoring service ready");
@@ -313,6 +366,17 @@ setInterval(async () => {
 setInterval(async () => {
   await monitorSystemHealth();
 }, 600000);
+
+// Data retention — run once per day (check every hour, execute once in 24h)
+setInterval(async () => {
+  const now = Date.now();
+  if (now - lastRetentionRun > 23 * 60 * 60 * 1000) { // at least 23h since last run
+    await enforceRetention();
+  }
+}, 3600000); // check hourly
+
+// Run retention on startup after a short delay
+setTimeout(() => enforceRetention(), 30000);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
