@@ -17,6 +17,7 @@
  */
 
 const axios = require('axios');
+const { toISODateUK } = require('./report-utils');
 require('dotenv').config();
 
 const BASE_URL = 'https://vrmapi.victronenergy.com/v2';
@@ -172,16 +173,16 @@ class VRMAPI {
     }));
 
     // Split into today vs tomorrow (midnight UK time boundary)
-    const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Europe/London' }); // YYYY-MM-DD
+    const todayStr = toISODateUK(now);
     const tomorrowDate = new Date(now);
     tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-    const tomorrowStr = tomorrowDate.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    const tomorrowStr = toISODateUK(tomorrowDate);
 
     let todayTotal = 0;
     let tomorrowTotal = 0;
 
     for (const point of forecastSeries) {
-      const pointDate = point.timestamp.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+      const pointDate = toISODateUK(point.timestamp);
       if (pointDate === todayStr) {
         todayTotal += point.kwh;
       } else if (pointDate === tomorrowStr) {

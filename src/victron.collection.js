@@ -129,8 +129,11 @@ const buffer = {
 
 let msgCount = 0; // messages received since last flush
 
+const MAX_BUFFER_SIZE = 5000; // cap per-metric to prevent OOM if flush fails
+
 function bufferValue(arr, value) {
   if (value !== null && value !== undefined && !isNaN(value)) {
+    if (arr.length >= MAX_BUFFER_SIZE) arr.shift(); // drop oldest
     arr.push(value);
   }
 }
@@ -224,6 +227,12 @@ async function flushBuffer() {
       await dbClient.query(`
         INSERT INTO victron_grid_data (timestamp, device_id, power_l1, power_l2, power_l3, voltage_l1, frequency)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (timestamp, device_id) DO UPDATE SET
+          power_l1 = COALESCE(EXCLUDED.power_l1, victron_grid_data.power_l1),
+          power_l2 = COALESCE(EXCLUDED.power_l2, victron_grid_data.power_l2),
+          power_l3 = COALESCE(EXCLUDED.power_l3, victron_grid_data.power_l3),
+          voltage_l1 = COALESCE(EXCLUDED.voltage_l1, victron_grid_data.voltage_l1),
+          frequency = COALESCE(EXCLUDED.frequency, victron_grid_data.frequency)
       `, [timestamp, DEVICE_ID, gL1, gL2, gL3, gV1, gFreq]);
       inserts++;
     }
@@ -236,6 +245,10 @@ async function flushBuffer() {
       await dbClient.query(`
         INSERT INTO victron_inverter_data (timestamp, device_id, power, voltage, current)
         VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (timestamp, device_id) DO UPDATE SET
+          power = COALESCE(EXCLUDED.power, victron_inverter_data.power),
+          voltage = COALESCE(EXCLUDED.voltage, victron_inverter_data.voltage),
+          current = COALESCE(EXCLUDED.current, victron_inverter_data.current)
       `, [timestamp, DEVICE_ID, invPow, invVolt, invCur]);
       inserts++;
     }
@@ -284,13 +297,20 @@ async function insertSystemEvent(event, value, timestamp) {
 }
 
 // ---------------- MQTT Setup ----------------
-async function connectDatabase() {
-  try {
-    await dbClient.connect();
-    log("Connected to PostgreSQL database");
-  } catch (err) {
-    log(`Failed to connect to database: ${err.message}`, "ERROR");
-    process.exit(1);
+async function connectDatabase(retries = 10) {
+  for (let i = 1; i <= retries; i++) {
+    try {
+      await dbClient.connect();
+      log("Connected to PostgreSQL database");
+      return;
+    } catch (err) {
+      log(`DB connection attempt ${i}/${retries} failed: ${err.message}`, "WARN");
+      if (i === retries) {
+        log("Giving up on database connection", "ERROR");
+        process.exit(1);
+      }
+      await new Promise(r => setTimeout(r, 5000));
+    }
   }
 }
 

@@ -21,7 +21,7 @@
 const cron = require('node-cron');
 const VRMAPI = require('./vrm-api');
 const { Client } = require('pg');
-const { ReportLogger, sendReport } = require('./report-utils');
+const { ReportLogger, sendReport, toISODateUK } = require('./report-utils');
 require('dotenv').config();
 
 const BATTERY_CAPACITY_KWH = parseFloat(process.env.BATTERY_CAPACITY_KWH) || 43;
@@ -375,14 +375,14 @@ if (explicitDate) {
     .catch(err => { console.error('Error:', err.message); process.exit(1); });
 } else {
   // Analyse today
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  const today = toISODateUK();
   analyse(today)
     .then(() => {
       if (runOnce) process.exit(0);
       // Schedule daily at 23:30 UK time
       console.log('Scheduling daily report at 23:30 Europe/London');
       cron.schedule('30 23 * * *', () => {
-        const d = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+        const d = toISODateUK();
         analyse(d).catch(err => console.error(`Scheduled report error: ${err.message}`));
       }, { timezone: 'Europe/London' });
     })
@@ -391,7 +391,7 @@ if (explicitDate) {
       if (runOnce) process.exit(1);
       console.log('Scheduling daily report at 23:30 despite first run failure');
       cron.schedule('30 23 * * *', () => {
-        const d = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+        const d = toISODateUK();
         analyse(d).catch(e => console.error(`Scheduled report error: ${e.message}`));
       }, { timezone: 'Europe/London' });
     });

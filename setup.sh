@@ -19,6 +19,10 @@ pm2 delete flux.sync 2>/dev/null || true
 pm2 delete strategy.advisor 2>/dev/null || true
 pm2 delete daily.report 2>/dev/null || true
 
+echo "=== Flushing logs ==="
+pm2 flush 2>/dev/null || true
+rm -rf "$SCRIPT_DIR/logs"/*.log 2>/dev/null || true
+
 echo "=== Starting all services ==="
 pm2 start "$SCRIPT_DIR/ecosystem.config.js"
 

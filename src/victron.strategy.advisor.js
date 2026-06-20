@@ -34,7 +34,7 @@ const axios = require('axios');
 const { Client } = require('pg');
 const VRMAPI = require('./vrm-api');
 const OctopusAPI = require('./octopus-api');
-const { ReportLogger, sendReport } = require('./report-utils');
+const { ReportLogger, sendReport, toISODateUK } = require('./report-utils');
 require('dotenv').config();
 
 const DB_CONFIG = {
@@ -221,8 +221,7 @@ function buildPrompt(forecast, soc, averages, rates, batteryCapacity, history) {
     .filter(p => {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
-      return p.timestamp.toLocaleDateString('en-CA', { timeZone: 'Europe/London' }) ===
-             tomorrow.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+      return toISODateUK(p.timestamp) === toISODateUK(tomorrow);
     })
     .map(p => `  ${p.timestamp.toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}: ${p.kwh.toFixed(2)} kWh`)
     .join('\n');
@@ -452,7 +451,7 @@ async function analyzeAndDecide() {
     // 7. Save to database
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
-    const decisionDate = tomorrow.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    const decisionDate = toISODateUK(tomorrow);
 
     await db.query(`
       INSERT INTO victron_strategy_decisions (
@@ -513,7 +512,7 @@ async function analyzeAndDecide() {
       // Delete existing forecast for this date, then insert fresh
       await db.query('DELETE FROM victron_solar_forecasts WHERE forecast_date = $1', [decisionDate]);
       for (const point of forecast.forecastSeries) {
-        const pointDate = point.timestamp.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+        const pointDate = toISODateUK(point.timestamp);
         if (pointDate === decisionDate) {
           await db.query(
             'INSERT INTO victron_solar_forecasts (forecast_date, hour_timestamp, forecast_kwh) VALUES ($1, $2, $3)',

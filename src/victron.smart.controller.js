@@ -18,6 +18,7 @@
 
 const mqtt = require('mqtt');
 const { Client } = require('pg');
+const { toISODateUK } = require('./report-utils');
 const OctopusAPI = require('./octopus-api');
 const fs = require('fs').promises;
 const path = require('path');
@@ -241,7 +242,7 @@ async function loadAdvisorDecision() {
   try {
     // During cheap rate (02:00-05:00), the relevant decision is for today's date
     // The advisor runs at 20:00 the night before and writes decision_date = tomorrow
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    const today = toISODateUK();
 
     const result = await dbClient.query(`
       SELECT action, target_soc, confidence, reasoning, solar_forecast_kwh,

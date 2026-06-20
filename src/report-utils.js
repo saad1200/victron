@@ -67,7 +67,7 @@ class ReportLogger {
       fs.mkdirSync(LOG_DIR, { recursive: true });
     }
 
-    const date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    const date = toISODateUK();
     const filename = `${this.name.toLowerCase().replace(/\s+/g, '-')}${suffix ? '-' + suffix : ''}-${date}.log`;
     this.logFile = path.join(LOG_DIR, filename);
 
@@ -125,4 +125,15 @@ async function sendReport(subject, body, attachmentPath) {
   }
 }
 
-module.exports = { ReportLogger, sendReport, LOG_DIR };
+/**
+ * Return YYYY-MM-DD string in Europe/London timezone.
+ * Works on Node.js builds without full ICU (e.g. Synology DSM).
+ * @param {Date} [dt] – defaults to now
+ */
+function toISODateUK(dt) {
+  const d = dt ? new Date(dt) : new Date();
+  const uk = new Date(d.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+  return `${uk.getFullYear()}-${String(uk.getMonth() + 1).padStart(2, '0')}-${String(uk.getDate()).padStart(2, '0')}`;
+}
+
+module.exports = { ReportLogger, sendReport, LOG_DIR, toISODateUK };
