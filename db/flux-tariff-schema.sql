@@ -82,6 +82,22 @@ CREATE INDEX IF NOT EXISTS idx_grid_setpoints_device ON victron_grid_setpoints(d
 -- Migration: add constraints to existing tables
 -- ═══════════════════════════════════════════════════════════════════════
 
+-- Deduplicate tariff periods: keep the oldest row per (period_name, product_id), delete the rest
+DELETE FROM victron_tariff_periods a
+USING victron_tariff_periods b
+WHERE a.period_name = b.period_name
+  AND COALESCE(a.product_id, 0) = COALESCE(b.product_id, 0)
+  AND a.id > b.id;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'victron_tariff_periods_name_product_key'
+  ) THEN
+    ALTER TABLE victron_tariff_periods
+      ADD CONSTRAINT victron_tariff_periods_name_product_key UNIQUE (period_name, product_id);
+  END IF;
+END $$;
+
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'victron_grid_setpoints_device_id_tariff_period_key'
@@ -147,12 +163,17 @@ ORDER BY tariff_period;
 -- Seed data (no-op if already exists)
 -- ═══════════════════════════════════════════════════════════════════════
 
-INSERT INTO victron_tariff_periods (period_name, import_rate_pence, export_rate_pence, start_time, end_time) VALUES
-('Night', 16.61, 5.05, '02:00:00', '05:00:00'),
-('Day', 27.68, 10.24, '05:00:00', '16:00:00'),
-('PEAK', 38.75, 29.79, '16:00:00', '19:00:00'),
-('Evening', 27.68, 10.24, '19:00:00', '02:00:00')
-ON CONFLICT DO NOTHING;
+-- Octopus Flux rates (June 2026, inc. VAT)
+-- Upserts: inserts if missing, updates rates if they changed
+INSERT INTO victron_tariff_periods (period_name, import_rate_pence, export_rate_pence, start_time, end_time, product_id) VALUES
+('Night',   15.49,  5.05, '02:00:00', '05:00:00', (SELECT id FROM products WHERE name = 'Octopus Flux')),
+('Day',     25.80, 10.24, '05:00:00', '16:00:00', (SELECT id FROM products WHERE name = 'Octopus Flux')),
+('PEAK',    36.13, 29.79, '16:00:00', '19:00:00', (SELECT id FROM products WHERE name = 'Octopus Flux')),
+('Evening', 25.80, 10.24, '19:00:00', '02:00:00', (SELECT id FROM products WHERE name = 'Octopus Flux'))
+ON CONFLICT (period_name, product_id) DO UPDATE SET
+  import_rate_pence = EXCLUDED.import_rate_pence,
+  export_rate_pence = EXCLUDED.export_rate_pence,
+  updated_at = NOW();
 
 INSERT INTO victron_grid_setpoints (device_id, tariff_period, grid_setpoint_watts, min_soc_percent, max_soc_percent, ess_mode, inverter_mode, description) VALUES
 ('c0619ab786e2', 'Night', 3000, 10.0, 70.0, 1, 1, 'Night charging: Import up to 3kW to charge battery to 70% - Charger Only mode'),

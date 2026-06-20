@@ -764,7 +764,9 @@ class OctopusAPI {
                     
                     console.log(`    ${agreement.tariff_code}: covers ${daysInPeriod.toFixed(1)} days of the period`);
                     
-                    if (daysInPeriod > maxDays) {
+                    // For point-in-time lookups (periodFrom === periodTo), daysInPeriod is 0.
+                    // Use the first relevant agreement sorted by most recent valid_from.
+                    if (daysInPeriod > maxDays || (maxDays === 0 && !bestAgreement)) {
                         maxDays = daysInPeriod;
                         bestAgreement = agreement;
                     }

@@ -40,18 +40,19 @@ const DB_CONFIG = {
  */
 async function loadTariffRates(logger) {
   const defaults = {
-    Night:   { import: 16.61, export: 5.05 },
-    Day:     { import: 27.68, export: 10.24 },
-    PEAK:    { import: 38.75, export: 29.79 },
-    Evening: { import: 27.68, export: 10.24 },
+    Night:   { import: 15.49, export: 5.05 },
+    Day:     { import: 25.80, export: 10.24 },
+    PEAK:    { import: 36.13, export: 29.79 },
+    Evening: { import: 25.80, export: 10.24 },
   };
 
   try {
     const db = new Client(DB_CONFIG);
     await db.connect();
     const result = await db.query(
-      `SELECT period_name, import_rate_pence, export_rate_pence
-       FROM victron_tariff_periods WHERE is_active = true`
+      `SELECT DISTINCT ON (period_name) period_name, import_rate_pence, export_rate_pence
+       FROM victron_tariff_periods WHERE is_active = true
+       ORDER BY period_name, updated_at DESC NULLS LAST`
     );
     await db.end();
 
@@ -354,8 +355,9 @@ async function analyse(targetDate) {
 
   // ─── Save and email ───
   const logPath = logger.saveToFile(targetDate);
+  const netLabel = netCost > 0 ? `Cost £${(netCost/100).toFixed(2)}` : `Earned £${(Math.abs(netCost)/100).toFixed(2)}`;
   await sendReport(
-    `⚡ Solar Daily Report: ${targetDate} — ${netCost > 0 ? 'Cost £' + (netCost/100).toFixed(2) : 'Earned £' + (Math.abs(netCost)/100).toFixed(2)}`,
+    `Solar Report ${targetDate} | ${totalSolarKwh.toFixed(1)} kWh generated | Net: ${netLabel}`,
     logger.getReport(),
     logPath
   );

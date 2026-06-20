@@ -165,11 +165,11 @@ class VRMAPI {
       interval: 'hours',
     });
 
-    // The forecast data comes as solar_yield_forecast: [[timestamp_ms, kwh], ...]
+    // The forecast data comes as solar_yield_forecast: [[timestamp_ms, watt_hours], ...]
     const forecastRaw = records.solar_yield_forecast || [];
-    const forecastSeries = forecastRaw.map(([ts, kwh]) => ({
+    const forecastSeries = forecastRaw.map(([ts, wh]) => ({
       timestamp: new Date(ts),
-      kwh: kwh || 0,
+      kwh: (wh || 0) / 1000,
     }));
 
     // Split into today vs tomorrow (midnight UK time boundary)

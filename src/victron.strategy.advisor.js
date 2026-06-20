@@ -3,35 +3,11 @@
  *
  * Daily analysis that decides whether to charge batteries from the grid
  * during cheap (night) rate, or skip charging and rely on solar instead.
- *
- * Flow:
- *  1. Fetch tomorrow's solar forecast from VRM API
- *  2. Get current battery SOC + recent consumption/solar from DB
- *  3. Get Flux tariff rates from Octopus API
- *  4. Send all data to ChatGPT for analysis
- *  5. Save the decision to victron_strategy_decisions table
- *  6. Smart controller reads the decision during cheap rate periods
- *
- * Runs daily at 20:00 UK time (before cheap rate starts at 02:00).
- *
- * Usage:
- *   node src/victron.strategy.advisor.js          # run + schedule daily
- *   node src/victron.strategy.advisor.js --once   # run once and exit
- *
- * Env vars:
- *   VRM_TOKEN / VRM_EMAIL + VRM_PASSWORD  – VRM API auth
- *   VRM_SITE_ID                           – VRM installation id (auto-detected)
- *   LLM_PROVIDER                          – 'openai' (default) or 'gemini'
- *   OPENAI_API_KEY                        – OpenAI API key
- *   OPENAI_MODEL                          – model name (default: gpt-4o-mini)
- *   GEMINI_API_KEY                        – Google Gemini API key
- *   GEMINI_MODEL                          – model name (default: gemini-2.0-flash)
- *   BATTERY_CAPACITY_KWH                  – usable battery capacity (default: 10)
  */
 
 const cron = require('node-cron');
 const axios = require('axios');
-const { Client } = require('pg');
+const { Pool } = require('pg');
 const VRMAPI = require('./vrm-api');
 const OctopusAPI = require('./octopus-api');
 const { ReportLogger, sendReport, toISODateUK } = require('./report-utils');
@@ -45,6 +21,7 @@ const DB_CONFIG = {
   port: process.env.DB_PORT || 5433,
 };
 
+const pool = new Pool({ ...DB_CONFIG, max: 2 });
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'openai').toLowerCase();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -60,7 +37,6 @@ function timestamp() {
   });
 }
 
-// Global logger instance — replaced per analyzeAndDecide() call
 let logger = new ReportLogger('ADVISOR');
 
 function log(msg, level = 'INFO') {
@@ -69,26 +45,20 @@ function log(msg, level = 'INFO') {
 
 // ─────────────────────────── Data Gathering ──────────────────────────
 
-/**
- * Get the latest battery SOC from the database.
- */
 async function getLatestSOC(db) {
   try {
     const result = await db.query(`
-      SELECT value FROM victron_battery_data
-      WHERE topic LIKE '%Soc'
+      SELECT soc FROM victron_battery_data
+      WHERE soc IS NOT NULL
       ORDER BY timestamp DESC LIMIT 1
     `);
-    return result.rows.length > 0 ? parseFloat(result.rows[0].value) : null;
+    return result.rows.length > 0 ? parseFloat(result.rows[0].soc) : null;
   } catch (e) {
     log(`Could not fetch SOC from DB: ${e.message}`, 'WARN');
     return null;
   }
 }
 
-/**
- * Get average daily consumption and solar from recent energy tracking.
- */
 async function getRecentAverages(db, daysBack = 14) {
   try {
     const result = await db.query(`
@@ -126,22 +96,15 @@ async function getRecentAverages(db, daysBack = 14) {
   return null;
 }
 
-/**
- * Get actual historical performance from energy tracking.
- * This gives the AI REAL data about peak export, night costs, and system efficiency.
- */
 async function getHistoricalPerformance(db, daysBack = 14) {
   try {
     const result = await db.query(`
       SELECT
-        -- Peak period (16:00-19:00): actual export achievable
         AVG(CASE WHEN tariff_period = 'PEAK' THEN total_export_kwh END) AS avg_peak_export_kwh,
         AVG(CASE WHEN tariff_period = 'PEAK' THEN total_export_earnings_pence END) AS avg_peak_earnings_pence,
         MAX(CASE WHEN tariff_period = 'PEAK' THEN total_export_kwh END) AS max_peak_export_kwh,
-        -- Night period (02:00-05:00): actual charge cost
         AVG(CASE WHEN tariff_period = 'Night' THEN total_import_kwh END) AS avg_night_import_kwh,
         AVG(CASE WHEN tariff_period = 'Night' THEN total_import_cost_pence END) AS avg_night_cost_pence,
-        -- Net daily result
         AVG(total_net_cost_pence) AS avg_daily_net_cost_pence,
         COUNT(DISTINCT date) AS days
       FROM v_daily_energy_summary
@@ -150,8 +113,6 @@ async function getHistoricalPerformance(db, daysBack = 14) {
 
     if (result.rows.length > 0 && result.rows[0].days > 0) {
       const r = result.rows[0];
-
-      // Calculate round-trip efficiency: how much of night import becomes peak export
       const nightImport = parseFloat(r.avg_night_import_kwh) || 0;
       const peakExport = parseFloat(r.avg_peak_export_kwh) || 0;
       const efficiency = nightImport > 0 ? (peakExport / nightImport) * 100 : null;
@@ -173,9 +134,6 @@ async function getHistoricalPerformance(db, daysBack = 14) {
   return null;
 }
 
-/**
- * Get current Flux rates from Octopus API.
- */
 async function getFluxRates() {
   try {
     const api = new OctopusAPI();
@@ -196,7 +154,6 @@ async function getFluxRates() {
       );
     }
 
-    // Find min import (cheap/night) and max export (peak)
     const importValues = importRates.map(r => r.value_inc_vat);
     const exportValues = exportRates.map(r => r.value_inc_vat);
 
@@ -213,7 +170,7 @@ async function getFluxRates() {
   }
 }
 
-// ─────────────────────────── OpenAI Analysis ─────────────────────────
+// ─────────────────────────── LLM Processing Engine ─────────────────────────
 
 function buildPrompt(forecast, soc, averages, rates, batteryCapacity, history) {
   const tomorrowKwh = forecast?.tomorrowTotal || 0;
@@ -257,28 +214,12 @@ OCTOPUS FLUX RATES (inc VAT):
 - Peak export (16:00-19:00): ${rates?.peakExport?.toFixed(2) || '?'}p/kWh  ← best export window
 - Day/Evening export: ${rates?.standardExport?.toFixed(2) || '?'}p/kWh
 
-IMPORTANT REAL-WORLD CONSTRAINTS:
-- Peak export is only 3 hours (16:00-19:00) and the house has consumption during this time
-- Actual peak export is typically ${history?.avgPeakExportKwh?.toFixed(0) || '10-11'} kWh, NOT the full battery capacity
-- In hot weather, export drops further (~10 kWh) due to inverter derating
-- There are significant system losses: charging from grid at night and exporting at peak loses ~${history?.systemEfficiency ? (100 - history.systemEfficiency).toFixed(0) : '15-25'}% of energy
-- Night charging is only worthwhile if the profit (peak export earnings minus night charge cost) exceeds zero AFTER losses
-- Solar charging is free, so even modest solar forecast may beat grid charging financially
-
 STRATEGY OPTIONS:
-1. "full_charge" – Charge battery to 100% from grid during cheap night rate. Best when solar forecast is very low AND night charge is profitable after losses.
-2. "partial_charge" – Charge to a specific target SOC (e.g. 20-50%) to cover morning consumption until solar kicks in. Good compromise.
-3. "skip_night_charge" – Don't charge from grid at all. Rely on solar tomorrow. Best when forecast is good — solar charges for free.
+1. "full_charge" – Charge battery to 100% from grid during cheap night rate.
+2. "partial_charge" – Charge to a specific target SOC (e.g. 20-50%).
+3. "skip_night_charge" – Don't charge from grid at all. Rely on solar tomorrow.
 
-ANALYSIS REQUIRED:
-- Use the ACTUAL historical performance data, not theoretical maximums
-- Calculate: night charge cost (${history?.avgNightImportKwh?.toFixed(1) || '?'} kWh × ${rates?.cheapImport?.toFixed(2) || '?'}p) vs peak export earnings (${history?.avgPeakExportKwh?.toFixed(1) || '?'} kWh × ${rates?.peakExport?.toFixed(2) || '?'}p)
-- Account for system round-trip efficiency loss of ${history?.systemEfficiency ? (100 - history.systemEfficiency).toFixed(0) : '~20'}%
-- If solar forecast ≥ battery capacity, solar can fill the battery for FREE — far better than paying for night charge
-- Consider morning consumption (05:00-09:00) before solar ramps up — partial charge can cover this gap
-- Factor in weather uncertainty — forecast is not guaranteed, but recent trends help
-
-Respond with ONLY valid JSON (no markdown, no code fences):
+Respond with ONLY valid JSON:
 {
   "action": "skip_night_charge" | "partial_charge" | "full_charge",
   "target_soc": <number 0-100 or null>,
@@ -287,20 +228,42 @@ Respond with ONLY valid JSON (no markdown, no code fences):
 }`;
 }
 
-/**
- * Call the configured LLM provider. Dispatches to OpenAI or Gemini.
- */
 async function callLLM(prompt) {
-  if (LLM_PROVIDER === 'gemini') {
-    return callGemini(prompt);
+  const primary = LLM_PROVIDER === 'gemini' ? callGemini : callOpenAI;
+  const fallback = LLM_PROVIDER === 'gemini' ? callOpenAI : callGemini;
+  const fallbackName = LLM_PROVIDER === 'gemini' ? 'openai' : 'gemini';
+  const fallbackKey = LLM_PROVIDER === 'gemini' ? OPENAI_API_KEY : GEMINI_API_KEY;
+
+  for (let i = 1; i <= 2; i++) {
+    try {
+      return await primary(prompt);
+    } catch (err) {
+      const status = err.response?.status;
+      
+      // Route immediately to fallback if we get a 429 on the final attempt or if we want immediate resilience
+      if (status === 429 && fallbackKey) {
+        log(`${LLM_PROVIDER} rate-limited (429), switching instantly to fallback ${fallbackName}...`, 'WARN');
+        try {
+          return await fallback(prompt);
+        } catch (fallbackErr) {
+          throw new Error(`Both primary and fallback LLM targets failed. Fallback error: ${fallbackErr.message}`);
+        }
+      }
+
+      // Handle transient server errors (5xx) or back-off sleep rules
+      if ((status === 429 || status >= 500) && i < 2) {
+        const delay = i === 1 ? 35000 : 60000;
+        log(`LLM request failed (${status}), cooling down for ${delay/1000}s before final attempt...`, 'WARN');
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
   }
-  return callOpenAI(prompt);
 }
 
 async function callOpenAI(prompt) {
-  if (!OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY not set — add it to .env or switch LLM_PROVIDER=gemini');
-  }
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set.');
 
   const response = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: OPENAI_MODEL,
@@ -311,10 +274,7 @@ async function callOpenAI(prompt) {
     temperature: 0.3,
     max_tokens: 300,
   }, {
-    headers: {
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
   });
 
   const choice = response.data.choices[0];
@@ -328,27 +288,41 @@ async function callOpenAI(prompt) {
 }
 
 async function callGemini(prompt) {
-  if (!GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY not set — add it to .env or switch LLM_PROVIDER=openai');
+  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set.');
+
+  const systemPrompt = 'You are a precise energy strategy advisor. Always respond with valid JSON only.';
+  const generationConfig = { temperature: 0.3, maxOutputTokens: 300, responseMimeType: 'application/json' };
+  const headers = { 'Content-Type': 'application/json' };
+
+  // Prioritize the production v1 endpoint over unstable v1beta models
+  const attempts = [
+    { api: 'v1', body: {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig,
+    }},
+    { api: 'v1beta', body: {
+      contents: [{ role: 'user', parts: [{ text: systemPrompt + '\n\n' + prompt }] }],
+      generationConfig,
+    }},
+  ];
+
+  let lastErr;
+  for (const { api, body } of attempts) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${api}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+      const response = await axios.post(url, body, { headers });
+      return parseGeminiResponse(response);
+    } catch (err) {
+      lastErr = err;
+      // If error is a structural 400 rejection, pivot immediately to the alternate payload body schema configuration
+      if (err.response?.status !== 400) throw err;
+    }
   }
+  throw lastErr;
+}
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const response = await axios.post(url, {
-    contents: [{
-      parts: [{
-        text: 'You are a precise energy strategy advisor. Always respond with valid JSON only.\n\n' + prompt,
-      }],
-    }],
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 300,
-      responseMimeType: 'application/json',
-    },
-  }, {
-    headers: { 'Content-Type': 'application/json' },
-  });
-
+function parseGeminiResponse(response) {
   const candidate = response.data.candidates?.[0];
   const text = candidate?.content?.parts?.[0]?.text || '';
   const usage = response.data.usageMetadata || {};
@@ -360,14 +334,8 @@ async function callGemini(prompt) {
   });
 }
 
-/**
- * Parse and validate the JSON response from any LLM provider.
- */
 function parseLLMResponse(rawText, meta) {
-  let text = rawText.trim();
-  // Strip markdown code fences if present
-  text = text.replace(/^```json?\s*/i, '').replace(/\s*```$/i, '');
-
+  let text = rawText.trim().replace(/^```json?\s*/i, '').replace(/\s*```$/i, '');
   let decision;
   try {
     decision = JSON.parse(text);
@@ -387,17 +355,14 @@ function parseLLMResponse(rawText, meta) {
   };
 }
 
-// ─────────────────────────── Main Logic ──────────────────────────────
+// ─────────────────────────── Main Control Logic ──────────────────────────────
 
 async function analyzeAndDecide() {
   logger = new ReportLogger('ADVISOR');
   log('═══ Starting daily strategy analysis ═══');
-  const db = new Client(DB_CONFIG);
+  const db = await pool.connect();
 
   try {
-    await db.connect();
-
-    // 1. Solar forecast from VRM
     let forecast = null;
     try {
       const vrm = new VRMAPI();
@@ -408,14 +373,11 @@ async function analyzeAndDecide() {
       log(`VRM solar forecast unavailable: ${e.message}`, 'WARN');
     }
 
-    // 2. Current battery SOC
     const soc = await getLatestSOC(db);
     log(`Battery SOC: ${soc !== null ? soc + '%' : 'unknown'}`);
 
-    // 3. Recent consumption/solar averages (from DB or VRM)
     let averages = await getRecentAverages(db);
     if (!averages) {
-      // Fallback: try VRM historical data
       try {
         const vrm = new VRMAPI();
         await vrm.login();
@@ -428,30 +390,31 @@ async function analyzeAndDecide() {
       log(`DB averages (${averages.days}d): consumption=${averages.avgConsumption.toFixed(1)} kWh, solar=${averages.avgSolar.toFixed(1)} kWh`);
     }
 
-    // 4. Historical performance (actual peak export, night costs, efficiency)
     const history = await getHistoricalPerformance(db);
     if (history) {
       log(`Historical (${history.days}d): peak_export=${history.avgPeakExportKwh.toFixed(1)} kWh, night_cost=${(history.avgNightCostPence/100).toFixed(2)}, efficiency=${history.systemEfficiency}%`);
     }
 
-    // 5. Current Flux rates
     const rates = await getFluxRates();
     if (rates) {
       log(`Rates: cheap=${rates.cheapImport.toFixed(1)}p, peak_export=${rates.peakExport.toFixed(1)}p`);
     }
 
-    // 6. Build prompt and call LLM
     const prompt = buildPrompt(forecast, soc, averages, rates, BATTERY_CAPACITY_KWH, history);
-    log(`Calling ${LLM_PROVIDER} (${LLM_PROVIDER === 'gemini' ? GEMINI_MODEL : OPENAI_MODEL}) for analysis...`);
+    log(`Calling ${LLM_PROVIDER.toUpperCase()} via callLLM wrapper matrix...`);
     const decision = await callLLM(prompt);
 
     log(`Decision: ${decision.action}${decision.target_soc ? ' (target=' + decision.target_soc + '%)' : ''} [${decision.confidence}]`);
     log(`Reasoning: ${decision.reasoning}`);
 
-    // 7. Save to database
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const decisionDate = toISODateUK(tomorrow);
+    // Fix context day string tracking bounds relative to current hour rules
+    const nowUK = new Date();
+    const todayUKString = toISODateUK(nowUK);
+    const [y, m, d] = todayUKString.split('-').map(Number);
+    
+    // If running at 01:00, the target day is TODAY. If running at 20:00, target day is TOMORROW.
+    const targetDateObject = new Date(y, m - 1, nowUK.getHours() < 12 ? d : d + 1);
+    const decisionDate = toISODateUK(targetDateObject);
 
     await db.query(`
       INSERT INTO victron_strategy_decisions (
@@ -469,114 +432,82 @@ async function analyzeAndDecide() {
         confidence = EXCLUDED.confidence,
         solar_forecast_kwh = EXCLUDED.solar_forecast_kwh,
         battery_soc = EXCLUDED.battery_soc,
-        battery_capacity_kwh = EXCLUDED.battery_capacity_kwh,
-        avg_daily_consumption_kwh = EXCLUDED.avg_daily_consumption_kwh,
-        avg_daily_solar_kwh = EXCLUDED.avg_daily_solar_kwh,
-        import_rate_cheap_pence = EXCLUDED.import_rate_cheap_pence,
-        export_rate_peak_pence = EXCLUDED.export_rate_peak_pence,
-        avg_peak_export_kwh = EXCLUDED.avg_peak_export_kwh,
-        avg_peak_earnings_pence = EXCLUDED.avg_peak_earnings_pence,
-        avg_night_import_kwh = EXCLUDED.avg_night_import_kwh,
-        avg_night_cost_pence = EXCLUDED.avg_night_cost_pence,
-        system_efficiency_pct = EXCLUDED.system_efficiency_pct,
         reasoning = EXCLUDED.reasoning,
         model = EXCLUDED.model,
-        prompt_tokens = EXCLUDED.prompt_tokens,
-        completion_tokens = EXCLUDED.completion_tokens,
         created_at = NOW()
     `, [
-      decisionDate,
-      decision.action,
-      decision.target_soc || null,
-      decision.confidence || 'medium',
-      forecast?.tomorrowTotal || null,
-      soc,
-      BATTERY_CAPACITY_KWH,
-      averages?.avgConsumption || averages?.avgSolarYield || null,
-      averages?.avgSolar || averages?.avgSolarYield || null,
-      rates?.cheapImport || null,
-      rates?.peakExport || null,
-      history?.avgPeakExportKwh || null,
-      history?.avgPeakEarningsPence || null,
-      history?.avgNightImportKwh || null,
-      history?.avgNightCostPence || null,
-      history?.systemEfficiency || null,
-      decision.reasoning,
-      decision.model || OPENAI_MODEL,
-      decision.promptTokens,
-      decision.completionTokens,
+      decisionDate, decision.action, decision.target_soc || null, decision.confidence || 'medium',
+      forecast?.tomorrowTotal || null, soc, BATTERY_CAPACITY_KWH, averages?.avgConsumption || null,
+      averages?.avgSolar || null, rates?.cheapImport || null, rates?.peakExport || null,
+      history?.avgPeakExportKwh || null, history?.avgPeakEarningsPence || null,
+      history?.avgNightImportKwh || null, history?.avgNightCostPence || null, history?.systemEfficiency || null,
+      decision.reasoning, decision.model, decision.promptTokens, decision.completionTokens,
     ]);
 
-    // 8. Save hourly forecast to DB
     if (forecast?.forecastSeries?.length > 0) {
-      // Delete existing forecast for this date, then insert fresh
       await db.query('DELETE FROM victron_solar_forecasts WHERE forecast_date = $1', [decisionDate]);
       for (const point of forecast.forecastSeries) {
-        const pointDate = toISODateUK(point.timestamp);
-        if (pointDate === decisionDate) {
+        if (toISODateUK(point.timestamp) === decisionDate) {
           await db.query(
             'INSERT INTO victron_solar_forecasts (forecast_date, hour_timestamp, forecast_kwh) VALUES ($1, $2, $3)',
             [decisionDate, point.timestamp.toISOString(), point.kwh]
           );
         }
       }
-      log(`Saved ${forecast.forecastSeries.length} hourly forecast points for ${decisionDate}`);
     }
 
-    log(`Decision saved for ${decisionDate}`);
-    log('═══ Strategy analysis complete ═══');
-
-    // Save report to file and email
+    log(`Decision successfully cataloged for date frame: ${decisionDate}`);
     const logPath = logger.saveToFile(decisionDate);
-    const actionLabel = decision.action.replace(/_/g, ' ');
-    await sendReport(
-      `🔋 Strategy Advisor: ${actionLabel} for ${decisionDate} [${decision.confidence}]`,
-      logger.getReport(),
-      logPath
-    );
+    const actionLabel = decision.action.replace(/_/g, ' ').toUpperCase();
+    await sendReport(`Strategy ${decisionDate} | ${actionLabel} [${decision.confidence}]`, logger.getReport(), logPath);
 
     return decision;
 
   } catch (error) {
-    log(`Analysis failed: ${error.message}`, 'ERROR');
+    log(`Analysis execution failed: ${error.message}`, 'ERROR');
     throw error;
   } finally {
-    try { await db.end(); } catch (e) { /* ignore */ }
+    db.release(); // Free connection handle back to the pool
   }
 }
 
-// ─────────────────────────── Main ────────────────────────────────────
+// ─────────────────────────── Boot Initialization ────────────────────────────────────
 
 const runOnce = process.argv.includes('--once');
 
-analyzeAndDecide()
-  .then(decision => {
-    log(`Result: ${decision.action} [${decision.confidence}]`);
-    if (runOnce) {
-      process.exit(0);
+async function startupWithRetry(maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await analyzeAndDecide();
+      return true;
+    } catch (err) {
+      log(`Startup attempt ${attempt}/${maxAttempts} failed: ${err.message}`, 'ERROR');
+      if (attempt < maxAttempts) {
+        log('Cooling down for 45s to clear rate limiting structures...', 'WARN');
+        await new Promise(r => setTimeout(r, 45000));
+      }
     }
-    scheduleRuns();
-  })
-  .catch(err => {
-    log(`Fatal: ${err.message}`, 'ERROR');
-    if (runOnce) {
-      process.exit(1);
-    }
-    scheduleRuns();
-  });
+  }
+  log('All startup attempts exhausted. Standing down daemon to allow background cron tasks.', 'ERROR');
+  return false;
+}
+
+startupWithRetry().then((success) => {
+  if (runOnce) process.exit(success ? 0 : 1);
+  scheduleRuns();
+});
 
 function scheduleRuns() {
-  // Primary: 20:00 UK — tomorrow's forecast is ready, plenty of time before cheap rate
-  log('Scheduling daily analysis at 20:00 + 01:00 Europe/London');
+  log('Scheduling strategy cron triggers at 20:00 and 01:00 (Europe/London)...');
+  
   cron.schedule('0 20 * * *', () => {
     analyzeAndDecide().catch(err => log(`20:00 analysis error: ${err.message}`, 'ERROR'));
   }, { timezone: 'Europe/London' });
 
-  // Final check: 01:00 UK — freshest forecast data, 1 hour before cheap rate starts
   cron.schedule('0 1 * * *', () => {
     analyzeAndDecide().catch(err => log(`01:00 analysis error: ${err.message}`, 'ERROR'));
   }, { timezone: 'Europe/London' });
 }
 
-process.on('SIGINT', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => { pool.end().then(() => process.exit(0)); });
+process.on('SIGTERM', () => { pool.end().then(() => process.exit(0)); });

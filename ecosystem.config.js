@@ -48,16 +48,19 @@ module.exports = {
       ...defaults,
       name: 'flux.sync',
       script: './src/victron.flux.sync.js',
+      autorestart: false,         // manages own cron schedule
     },
     {
       ...defaults,
       name: 'strategy.advisor',
       script: './src/victron.strategy.advisor.js',
+      autorestart: false,         // manages own cron schedule; PM2 restart loops burn API quota
     },
     {
       ...defaults,
       name: 'daily.report',
       script: './src/analyse-day.js',
+      autorestart: false,         // manages own cron schedule
     }
   ]
 };

@@ -218,17 +218,24 @@ async function log(message, level = 'INFO') {
 
 // ─────────────────────────── Database ───────────────────────────────
 
-async function initializeDatabase() {
-  dbClient = new Client(DB_CONFIG);
-  try {
-    await dbClient.connect();
-    await dbClient.query('SELECT NOW()');
-    log('Database connection successful');
-    return true;
-  } catch (error) {
-    log(`Database connection failed: ${error.message}`, 'ERROR');
-    return false;
+async function initializeDatabase(retries = 10) {
+  for (let i = 1; i <= retries; i++) {
+    dbClient = new Client(DB_CONFIG);
+    try {
+      await dbClient.connect();
+      await dbClient.query('SELECT NOW()');
+      log('Database connection successful');
+      return true;
+    } catch (error) {
+      log(`DB connection attempt ${i}/${retries} failed: ${error.message}`, 'WARN');
+      try { await dbClient.end(); } catch (_) {}
+      if (i < retries) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
   }
+  log('Database connection failed after all retries', 'ERROR');
+  return false;
 }
 
 // ─────────────────────── Strategy Advisor ─────────────────────────────
@@ -263,9 +270,10 @@ async function loadAdvisorDecision() {
       };
       log(`Advisor decision loaded: ${advisorDecision.action}${advisorDecision.target_soc ? ' (target=' + advisorDecision.target_soc + '%)' : ''} [${advisorDecision.confidence}] — forecast=${advisorDecision.solarForecast} kWh`);
     } else {
-      advisorDecision = null;
+      // No AI decision available — default to skip night charge, export during peak
+      advisorDecision = { action: 'skip_night_charge', confidence: 'low', reasoning: 'No advisor decision available — defaulting to skip night charge' };
       if (!advisorDecisionLoaded) {
-        log('No advisor decision found for today — defaulting to full charge');
+        log('No advisor decision found for today — defaulting to skip night charge');
       }
     }
     advisorDecisionLoaded = true;
@@ -274,7 +282,7 @@ async function loadAdvisorDecision() {
     if (!err.message.includes('does not exist')) {
       log(`Advisor decision load failed: ${err.message}`, 'WARN');
     }
-    advisorDecision = null;
+    advisorDecision = { action: 'skip_night_charge', confidence: 'low', reasoning: 'DB error — defaulting to skip night charge' };
     advisorDecisionLoaded = true;
   }
 }
