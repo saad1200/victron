@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
+const OctopusAPI = require('./octopus-api');
 
 // Database connection
 const dbClient = new Pool({
@@ -11,14 +12,31 @@ const dbClient = new Pool({
   password: process.env.DB_PASSWORD || 'password',
 });
 
+// Initialize Octopus API
+const octopusAPI = new OctopusAPI();
+
 const app = express();
 const PORT = process.env.DASHBOARD_PORT || 3001;
 
 // Serve static files from dashboard directory
 app.use(express.static(path.join(__dirname, '../dashboard')));
 
-// API endpoint for dashboard data
+// API endpoint for dashboard data using Octopus API
 app.get('/api/dashboard-data', async (req, res) => {
+  try {
+    const { range = '7days', groupBy = 'day' } = req.query;
+    
+    const data = await getOctopusDashboardData(range, groupBy);
+    res.json(data);
+    
+  } catch (error) {
+    console.error('Dashboard API error:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Legacy API endpoint for backward compatibility
+app.get('/api/dashboard-data-legacy', async (req, res) => {
   try {
     const { start, end, period = 'day' } = req.query;
     
@@ -34,6 +52,160 @@ app.get('/api/dashboard-data', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+async function getOctopusDashboardData(range, groupBy) {
+  try {
+    // Get date range
+    const { periodFrom, periodTo } = octopusAPI.getDateRange(range);
+    console.log(`Fetching data from ${periodFrom} to ${periodTo}, grouped by ${groupBy}`);
+    
+    // Get enriched consumption data (following SolisAgileManager approach)
+    const enrichedData = await octopusAPI.getEnrichedConsumption(periodFrom, periodTo, groupBy);
+    
+    if (enrichedData.length === 0) {
+      console.log('No enriched data returned');
+      return {
+        summary: {
+          totalImported: 0,
+          totalExported: 0,
+          totalImportCost: 0,
+          totalExportEarnings: 0,
+          totalStandingCharges: 0,
+          totalNetCost: 0,
+          avgImportRate: 0,
+          avgExportRate: 0,
+          netProfit: 0
+        },
+        timeSeries: [],
+        range,
+        groupBy,
+        totalDays: 0
+      };
+    }
+    
+    // Group data by the requested period
+    const groupedData = groupDataByPeriod(enrichedData, groupBy);
+    
+    // Calculate summary statistics
+    const summary = calculateSummary(groupedData);
+    
+    console.log(`Returning ${groupedData.length} grouped entries`);
+    
+    return {
+      summary,
+      timeSeries: groupedData,
+      range,
+      groupBy,
+      totalDays: groupedData.length
+    };
+    
+  } catch (error) {
+    console.error('Error fetching Octopus data:', error);
+    throw error;
+  }
+}
+
+function groupDataByPeriod(enrichedData, groupBy) {
+  const grouped = {};
+  
+  enrichedData.forEach(item => {
+    let key;
+    const date = new Date(item.period);
+    
+    switch (groupBy) {
+      case 'hour':
+        key = item.period.substring(0, 13); // YYYY-MM-DDTHH
+        break;
+      case 'day':
+        key = item.date;
+        break;
+      case 'week':
+        const weekStart = new Date(date);
+        weekStart.setDate(date.getDate() - date.getDay());
+        key = weekStart.toISOString().substring(0, 10);
+        break;
+      case 'month':
+        key = item.date.substring(0, 7); // YYYY-MM
+        break;
+      default:
+        key = item.date;
+    }
+    
+    if (!grouped[key]) {
+      grouped[key] = {
+        period: key,
+        date: key,
+        productName: item.productName || 'Unknown',
+        importedKwh: 0,
+        exportedKwh: 0,
+        importCost: 0,
+        exportEarnings: 0,
+        standingCharge: 0,
+        netCost: 0,
+        avgImportRate: 0,
+        avgExportRate: 0,
+        count: 0
+      };
+      
+      // Debug logging for first few groups
+      if (Object.keys(grouped).length <= 3) {
+        console.log(`Creating group ${key} with product: ${item.productName}`);
+      }
+    }
+    
+    const group = grouped[key];
+    group.importedKwh += item.importedKwh || 0;
+    group.exportedKwh += item.exportedKwh || 0;
+    group.importCost += item.importCost || 0;
+    group.exportEarnings += item.exportEarnings || 0;
+    group.standingCharge += item.standingCharge || 0;
+    group.netCost += item.netCost || 0;
+    
+    // Calculate weighted averages for rates
+    const totalImportKwh = group.importedKwh;
+    const totalExportKwh = group.exportedKwh;
+    
+    if (totalImportKwh > 0) {
+      group.avgImportRate = (group.importCost / totalImportKwh) * 100; // Convert back to pence
+    }
+    if (totalExportKwh > 0) {
+      group.avgExportRate = (group.exportEarnings / totalExportKwh) * 100; // Convert back to pence
+    }
+    
+    group.count += 1;
+  });
+  
+  return Object.values(grouped).sort((a, b) => b.period.localeCompare(a.period)); // Descending order
+}
+
+function calculateSummary(groupedData) {
+  const totals = groupedData.reduce((acc, item) => {
+    acc.totalImported += item.importedKwh;
+    acc.totalExported += item.exportedKwh;
+    acc.totalImportCost += item.importCost;
+    acc.totalExportEarnings += item.exportEarnings;
+    acc.totalStandingCharges += item.standingCharge;
+    acc.totalNetCost += item.netCost;
+    return acc;
+  }, {
+    totalImported: 0,
+    totalExported: 0,
+    totalImportCost: 0,
+    totalExportEarnings: 0,
+    totalStandingCharges: 0,
+    totalNetCost: 0
+  });
+  
+  const avgImportRate = totals.totalImported > 0 ? (totals.totalImportCost / totals.totalImported) * 100 : 0;
+  const avgExportRate = totals.totalExported > 0 ? (totals.totalExportEarnings / totals.totalExported) * 100 : 0;
+  
+  return {
+    ...totals,
+    avgImportRate: avgImportRate,
+    avgExportRate: avgExportRate,
+    netProfit: totals.totalExportEarnings - totals.totalImportCost - totals.totalStandingCharges
+  };
+}
 
 async function getDashboardData(startDate, endDate, period) {
   const data = {
