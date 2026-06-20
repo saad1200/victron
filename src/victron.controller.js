@@ -88,8 +88,11 @@ async function loadProductController(product) {
         controllerPath = './victron.flux.controller';
         break;
       case 'Octopus Agile':
-        // Future implementation
         controllerPath = './victron.agile.controller';
+        break;
+      case 'Smart':
+      case 'Smart Controller':
+        controllerPath = './victron.smart.controller';
         break;
       default:
         log(`Unknown product: ${product.name}`, "ERROR");

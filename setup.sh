@@ -1,11 +1,18 @@
 #!/bin/bash
 # Enhanced setup with auto-restart capability
+# Stops any existing processes, starts all services, and configures boot persistence
+
+# Clean up any existing PM2 processes for this project
 pm2 delete victron.collection 2>/dev/null || true
-pm2 delete victron.controller 2>/dev/null || 
+pm2 delete victron.controller 2>/dev/null || true
 pm2 delete victron.monitoring 2>/dev/null || true
+pm2 delete victron.smart 2>/dev/null || true
+pm2 delete dashboard.api 2>/dev/null || true
+pm2 delete flux.sync 2>/dev/null || true
+pm2 delete strategy.advisor 2>/dev/null || true
 
 ## Start all apps via PM2 ecosystem (ensures consistent names and options)
-pm2 start ecosystem.config.js --only victron.collection,victron.controller,victron.monitoring,dashboard.api --restart-delay=3000
+pm2 start ecosystem.config.js --restart-delay=3000
 
 # Save PM2 configuration
 pm2 save

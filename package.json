@@ -6,6 +6,12 @@
     "start": "node server.js",
     "victron.collection": "node ./src/victron.collection.js",
     "victron.controller": "node ./src/victron.controller.js",
+    "victron.smart": "node ./src/victron.smart.controller.js",
+    "flux.sync": "node ./src/victron.flux.sync.js",
+    "flux.sync.once": "node ./src/victron.flux.sync.js --once",
+    "strategy.advisor": "node ./src/victron.strategy.advisor.js",
+    "strategy.advisor.once": "node ./src/victron.strategy.advisor.js --once",
+    "discover.topics": "node ./src/discover-topics.js",
     "dashboard": "node ./src/dashboard-api.js",
     "delete.data": "node delete-all-data.js"
   },

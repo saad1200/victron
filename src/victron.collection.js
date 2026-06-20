@@ -13,6 +13,7 @@ require("dotenv").config();
 // ---------------- Config ----------------
 const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://192.168.9.226";
 const DEVICE_ID = process.env.DEVICE_ID || "c0619ab786e2";
+const EV_CHARGER_INSTANCE = process.env.EV_CHARGER_INSTANCE || '0';
 
 // Database configuration
 const DB_CONFIG = {
@@ -66,7 +67,21 @@ const MQTT_TOPICS = {
   INVERTER_CURRENT: `N/${DEVICE_ID}/vebus/276/Ac/Out/L1/I`,
   
   // System events
-  VEBUS_ERROR: `N/${DEVICE_ID}/vebus/276/VebusError`
+  VEBUS_ERROR: `N/${DEVICE_ID}/vebus/276/VebusError`,
+
+  // EV Charger (Victron EVCS)
+  EV_STATUS: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Status`,
+  EV_MODE: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Mode`,
+  EV_POWER: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Ac/Power`,
+  EV_POWER_L1: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Ac/L1/Power`,
+  EV_POWER_L2: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Ac/L2/Power`,
+  EV_POWER_L3: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Ac/L3/Power`,
+  EV_CURRENT: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Current`,
+  EV_MAX_CURRENT: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/MaxCurrent`,
+  EV_SET_CURRENT: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/SetCurrent`,
+  EV_ENERGY: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/Ac/Energy/Forward`,
+  EV_CHARGING_TIME: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/ChargingTime`,
+  EV_START_STOP: `N/${DEVICE_ID}/evcharger/${EV_CHARGER_INSTANCE}/StartStop`
 };
 
 // ---------------- Logging ----------------
@@ -172,6 +187,21 @@ async function insertInverterDataPoint(power, voltage, current, timestamp) {
     await dbClient.query(query, [timestamp, DEVICE_ID, power, voltage, current]);
   } catch (err) {
     log(`Error inserting inverter data: ${err.message}`, "ERROR");
+  }
+}
+
+async function insertEVDataPoint(power, current, energy, status, timestamp) {
+  try {
+    const query = `
+      INSERT INTO victron_ev_data (timestamp, device_id, power_watts, current_amps, energy_kwh, status)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `;
+    await dbClient.query(query, [timestamp, DEVICE_ID, power, current, energy, status]);
+  } catch (err) {
+    // Table may not exist yet — non-critical, silently skip
+    if (!err.message.includes('does not exist')) {
+      log(`Error inserting EV data: ${err.message}`, "ERROR");
+    }
   }
 }
 
@@ -335,6 +365,47 @@ function setupMQTT() {
         case MQTT_TOPICS.VEBUS_ERROR:
           await insertMetric(DEVICE_ID, "system", "vebus_error", value, "", topic);
           await insertSystemEvent("vebus_error", value, timestamp);
+          break;
+
+        // EV Charger metrics
+        case MQTT_TOPICS.EV_STATUS:
+          await insertMetric(DEVICE_ID, "evcharger", "status", value, "", topic);
+          break;
+        case MQTT_TOPICS.EV_MODE:
+          await insertMetric(DEVICE_ID, "evcharger", "mode", value, "", topic);
+          break;
+        case MQTT_TOPICS.EV_POWER:
+          await insertMetric(DEVICE_ID, "evcharger", "power", value, "W", topic);
+          await insertEVDataPoint(value, null, null, null, timestamp);
+          break;
+        case MQTT_TOPICS.EV_POWER_L1:
+          await insertMetric(DEVICE_ID, "evcharger", "power_l1", value, "W", topic);
+          break;
+        case MQTT_TOPICS.EV_POWER_L2:
+          await insertMetric(DEVICE_ID, "evcharger", "power_l2", value, "W", topic);
+          break;
+        case MQTT_TOPICS.EV_POWER_L3:
+          await insertMetric(DEVICE_ID, "evcharger", "power_l3", value, "W", topic);
+          break;
+        case MQTT_TOPICS.EV_CURRENT:
+          await insertMetric(DEVICE_ID, "evcharger", "current", value, "A", topic);
+          await insertEVDataPoint(null, value, null, null, timestamp);
+          break;
+        case MQTT_TOPICS.EV_MAX_CURRENT:
+          await insertMetric(DEVICE_ID, "evcharger", "max_current", value, "A", topic);
+          break;
+        case MQTT_TOPICS.EV_SET_CURRENT:
+          await insertMetric(DEVICE_ID, "evcharger", "set_current", value, "A", topic);
+          break;
+        case MQTT_TOPICS.EV_ENERGY:
+          await insertMetric(DEVICE_ID, "evcharger", "energy", value, "kWh", topic);
+          await insertEVDataPoint(null, null, value, null, timestamp);
+          break;
+        case MQTT_TOPICS.EV_CHARGING_TIME:
+          await insertMetric(DEVICE_ID, "evcharger", "charging_time", value, "s", topic);
+          break;
+        case MQTT_TOPICS.EV_START_STOP:
+          await insertMetric(DEVICE_ID, "evcharger", "start_stop", value, "", topic);
           break;
 
         // default:

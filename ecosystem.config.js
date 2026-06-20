@@ -35,6 +35,33 @@ module.exports = {
       env: {
         NODE_ENV: 'production'
       }
+    },
+    {
+      name: 'victron.smart',
+      cwd: __dirname,
+      script: './src/victron.smart.controller.js',
+      interpreter: 'node',
+      env: {
+        NODE_ENV: 'production'
+      }
+    },
+    {
+      name: 'flux.sync',
+      cwd: __dirname,
+      script: './src/victron.flux.sync.js',
+      interpreter: 'node',
+      env: {
+        NODE_ENV: 'production'
+      }
+    },
+    {
+      name: 'strategy.advisor',
+      cwd: __dirname,
+      script: './src/victron.strategy.advisor.js',
+      interpreter: 'node',
+      env: {
+        NODE_ENV: 'production'
+      }
     }
   ]
 };
