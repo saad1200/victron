@@ -34,6 +34,7 @@ const axios = require('axios');
 const { Client } = require('pg');
 const VRMAPI = require('./vrm-api');
 const OctopusAPI = require('./octopus-api');
+const { ReportLogger, sendReport } = require('./report-utils');
 require('dotenv').config();
 
 const DB_CONFIG = {
@@ -59,8 +60,11 @@ function timestamp() {
   });
 }
 
+// Global logger instance — replaced per analyzeAndDecide() call
+let logger = new ReportLogger('ADVISOR');
+
 function log(msg, level = 'INFO') {
-  console.log(`[${timestamp()}] [ADVISOR] [${level}] ${msg}`);
+  logger.log(msg, level);
 }
 
 // ─────────────────────────── Data Gathering ──────────────────────────
@@ -387,6 +391,7 @@ function parseLLMResponse(rawText, meta) {
 // ─────────────────────────── Main Logic ──────────────────────────────
 
 async function analyzeAndDecide() {
+  logger = new ReportLogger('ADVISOR');
   log('═══ Starting daily strategy analysis ═══');
   const db = new Client(DB_CONFIG);
 
@@ -521,6 +526,15 @@ async function analyzeAndDecide() {
 
     log(`Decision saved for ${decisionDate}`);
     log('═══ Strategy analysis complete ═══');
+
+    // Save report to file and email
+    const logPath = logger.saveToFile(decisionDate);
+    const actionLabel = decision.action.replace(/_/g, ' ');
+    await sendReport(
+      `🔋 Strategy Advisor: ${actionLabel} for ${decisionDate} [${decision.confidence}]`,
+      logger.getReport(),
+      logPath
+    );
 
     return decision;
 

@@ -62,6 +62,15 @@ module.exports = {
       env: {
         NODE_ENV: 'production'
       }
+    },
+    {
+      name: 'daily.report',
+      cwd: __dirname,
+      script: './src/analyse-day.js',
+      interpreter: 'node',
+      env: {
+        NODE_ENV: 'production'
+      }
     }
   ]
 };

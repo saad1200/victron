@@ -10,6 +10,7 @@ pm2 delete victron.smart 2>/dev/null || true
 pm2 delete dashboard.api 2>/dev/null || true
 pm2 delete flux.sync 2>/dev/null || true
 pm2 delete strategy.advisor 2>/dev/null || true
+pm2 delete daily.report 2>/dev/null || true
 
 ## Start all apps via PM2 ecosystem (ensures consistent names and options)
 pm2 start ecosystem.config.js --restart-delay=3000
