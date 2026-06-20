@@ -1,76 +1,63 @@
+// Shared defaults for all apps
+const defaults = {
+  cwd: __dirname,
+  interpreter: 'node',
+  autorestart: true,          // restart on crash
+  watch: false,               // file-watch off by default (enable per-app if needed)
+  max_restarts: 50,           // max restarts within restart_delay window before stopping
+  min_uptime: '10s',          // consider started only if alive > 10s (avoids rapid crash loops)
+  restart_delay: 5000,        // wait 5s between crash restarts
+  exp_backoff_restart_delay: 100, // exponential backoff starting at 100ms (caps at 15s)
+  max_memory_restart: '200M', // restart if memory exceeds 200MB (leak protection)
+  merge_logs: true,           // combine cluster logs into single file
+  log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+  env: {
+    NODE_ENV: 'production'
+  }
+};
+
 module.exports = {
   apps: [
     {
+      ...defaults,
       name: 'victron.collection',
-      cwd: __dirname,
       script: './src/victron.collection.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'victron.monitoring',
-      cwd: __dirname,
       script: './src/victron.monitoring.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'victron.controller',
-      cwd: __dirname,
       script: './src/victron.controller.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'dashboard.api',
-      cwd: __dirname,
       script: './src/dashboard-api.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
+      listen_timeout: 10000,  // give Express time to bind
     },
     {
+      ...defaults,
       name: 'victron.smart',
-      cwd: __dirname,
       script: './src/victron.smart.controller.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'flux.sync',
-      cwd: __dirname,
       script: './src/victron.flux.sync.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'strategy.advisor',
-      cwd: __dirname,
       script: './src/victron.strategy.advisor.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     },
     {
+      ...defaults,
       name: 'daily.report',
-      cwd: __dirname,
       script: './src/analyse-day.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: 'production'
-      }
     }
   ]
 };

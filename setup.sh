@@ -1,8 +1,15 @@
 #!/bin/bash
 # Enhanced setup with auto-restart capability
 # Stops any existing processes, starts all services, and configures boot persistence
+#
+# Usage:  bash setup.sh          — normal setup
+#         bash setup.sh --startup — also configure boot persistence (needs sudo)
 
-# Clean up any existing PM2 processes for this project
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "=== Stopping existing PM2 processes ==="
 pm2 delete victron.collection 2>/dev/null || true
 pm2 delete victron.controller 2>/dev/null || true
 pm2 delete victron.monitoring 2>/dev/null || true
@@ -12,18 +19,34 @@ pm2 delete flux.sync 2>/dev/null || true
 pm2 delete strategy.advisor 2>/dev/null || true
 pm2 delete daily.report 2>/dev/null || true
 
-## Start all apps via PM2 ecosystem (ensures consistent names and options)
-pm2 start ecosystem.config.js --restart-delay=3000
+echo "=== Starting all services ==="
+pm2 start "$SCRIPT_DIR/ecosystem.config.js"
 
-# Save PM2 configuration
+echo "=== Saving PM2 process list ==="
 pm2 save
 
-## Configure PM2 to launch on boot (Synology DSM uses systemd)
-## Ensure PATH contains required locations so PM2 writes them into the systemd unit
-export PATH="/usr/local/bin:/usr/bin:$PATH"
-pm2 startup systemd -u "$USER" --hp "$HOME" || true
+# Configure PM2 to start on boot (run once, or with --startup flag)
+if [ "$1" = "--startup" ]; then
+  echo "=== Configuring PM2 boot persistence ==="
+  # pm2 startup prints a sudo command — capture and execute it
+  STARTUP_CMD=$(pm2 startup systemd -u "$USER" --hp "$HOME" 2>&1 | grep -o 'sudo .*' || true)
+  if [ -n "$STARTUP_CMD" ]; then
+    echo "Running: $STARTUP_CMD"
+    eval "$STARTUP_CMD"
+  else
+    echo "pm2 startup already configured or could not parse command."
+    pm2 startup systemd -u "$USER" --hp "$HOME" || true
+  fi
+  pm2 save
+  echo "Boot persistence configured. PM2 will auto-start on reboot."
+else
+  echo ""
+  echo "NOTE: To survive reboots, run once:  bash setup.sh --startup"
+  echo "  Or manually:  pm2 startup   (copy & run the sudo command it prints)"
+  echo "                pm2 save"
+fi
 
-## Save the current process list again to ensure resurrection on boot
-pm2 save
-
-echo "PM2 processes started and saved. Autostart configured via systemd."
+echo ""
+pm2 list
+echo ""
+echo "Setup complete."
