@@ -228,38 +228,114 @@ Respond with ONLY valid JSON:
 }`;
 }
 
-async function callLLM(prompt) {
+// ─────────────────────────── Local Rule-Based Provider ───────────────
+//
+// Decision thresholds (assuming avgConsumption=15 kWh, peakNeed=14 kWh):
+//
+//  Forecast  Surplus  Decision
+//  ────────  ───────  ──────────────────────────────────
+//  48 kWh    31 kWh   skip_night_charge  (surplus ≥ 14.5)
+//  32 kWh    15 kWh   skip_night_charge  (surplus ≥ 14.5)
+//  27 kWh    10 kWh   partial_charge     (surplus ≥ 4.4)
+//  21 kWh     4 kWh   partial_charge     (surplus ≥ 4.4)
+//  20 kWh     3 kWh   full_charge        (surplus < 4.4)
+//   5 kWh     0 kWh   full_charge        (surplus < 4.4)
+//
+// peakNeed = avgPeakExport (default 11.5 kWh) + peakHouseConsumption (3 kWh)
+// surplus  = max(0, forecast - avgConsumption)
+// skip:      surplus >= peakNeed
+// partial:   surplus >= peakNeed * 0.3
+// full:      otherwise
+
+function localDecision(forecast, soc, averages, rates, batteryCapacity, history) {
+  const tomorrowKwh = forecast?.tomorrowTotal || 0;
+  const avgConsumption = averages?.avgConsumption || 17;   // fallback 17 kWh/day if no data (typical 15-20 range)
+  const cheapRate = rates?.cheapImport || 15.5;
+  const peakExportRate = rates?.peakExport || 29.8;
+
+  // Actual peak export from history, or default 11.5 kWh (inverter max over 3h peak)
+  const peakExportKwh = history?.avgPeakExportKwh || 11.5;
+  // House consumption during peak hours (~1 kWh/hr × 3 hours)
+  const peakHouseKwh = 3;
+  // Total energy the battery needs for peak = export + house during peak
+  const energyNeededForPeak = peakExportKwh + peakHouseKwh;
+
+  // Solar surplus available to charge battery (after covering daytime consumption)
+  const solarSurplus = Math.max(0, tomorrowKwh - avgConsumption);
+
+  const meta = { model: 'local-rules', promptTokens: 0, completionTokens: 0 };
+
+  // Abundant solar — surplus covers peak export needs comfortably
+  if (solarSurplus >= energyNeededForPeak) {
+    return {
+      ...meta,
+      action: 'skip_night_charge',
+      target_soc: null,
+      confidence: solarSurplus >= energyNeededForPeak * 1.3 ? 'high' : 'medium',
+      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus after ${avgConsumption.toFixed(1)} kWh consumption — covers ${energyNeededForPeak.toFixed(0)} kWh needed for peak export (${peakExportKwh.toFixed(0)} kWh export + ${peakHouseKwh} kWh house).`,
+    };
+  }
+
+  // Moderate solar — partial charge to supplement what solar can't cover
+  if (solarSurplus >= energyNeededForPeak * 0.3) {
+    const gridTopUpKwh = energyNeededForPeak - solarSurplus;
+    const targetSoc = Math.min(50, Math.max(20, Math.round((gridTopUpKwh / batteryCapacity) * 100) + 20));
+    return {
+      ...meta,
+      action: 'partial_charge',
+      target_soc: targetSoc,
+      confidence: 'medium',
+      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus — covers ${Math.round(solarSurplus / energyNeededForPeak * 100)}% of ${energyNeededForPeak.toFixed(0)} kWh peak need. Charging to ${targetSoc}% to top up remaining ${gridTopUpKwh.toFixed(1)} kWh from grid at ${cheapRate.toFixed(1)}p.`,
+    };
+  }
+
+  // Low/no solar — full charge for peak export arbitrage
+  return {
+    ...meta,
+    action: 'full_charge',
+    target_soc: 100,
+    confidence: solarSurplus < 2 ? 'high' : 'medium',
+    reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh insufficient (surplus ${solarSurplus.toFixed(1)} kWh after ${avgConsumption.toFixed(1)} kWh consumption vs ${energyNeededForPeak.toFixed(0)} kWh peak need). Full charge at ${cheapRate.toFixed(1)}p to export at ${peakExportRate.toFixed(1)}p during peak.`,
+  };
+}
+
+// ─────────────────────────── Provider Dispatcher ─────────────────────
+
+async function callProvider(forecast, soc, averages, rates, batteryCapacity, history) {
+  // Local provider — no API calls needed
+  if (LLM_PROVIDER === 'local') {
+    log('Using local rule-based provider (no LLM)');
+    return localDecision(forecast, soc, averages, rates, batteryCapacity, history);
+  }
+
+  // LLM provider with fallback chain: primary → fallback LLM → local rules
+  const prompt = buildPrompt(forecast, soc, averages, rates, batteryCapacity, history);
   const primary = LLM_PROVIDER === 'gemini' ? callGemini : callOpenAI;
   const fallback = LLM_PROVIDER === 'gemini' ? callOpenAI : callGemini;
   const fallbackName = LLM_PROVIDER === 'gemini' ? 'openai' : 'gemini';
   const fallbackKey = LLM_PROVIDER === 'gemini' ? OPENAI_API_KEY : GEMINI_API_KEY;
 
-  for (let i = 1; i <= 2; i++) {
-    try {
-      return await primary(prompt);
-    } catch (err) {
-      const status = err.response?.status;
-      
-      // Route immediately to fallback if we get a 429 on the final attempt or if we want immediate resilience
-      if (status === 429 && fallbackKey) {
-        log(`${LLM_PROVIDER} rate-limited (429), switching instantly to fallback ${fallbackName}...`, 'WARN');
-        try {
-          return await fallback(prompt);
-        } catch (fallbackErr) {
-          throw new Error(`Both primary and fallback LLM targets failed. Fallback error: ${fallbackErr.message}`);
-        }
-      }
+  // Try primary LLM
+  try {
+    log(`Calling ${LLM_PROVIDER} (primary)...`);
+    return await primary(prompt);
+  } catch (err) {
+    log(`Primary ${LLM_PROVIDER} failed: ${err.response?.status || err.message}`, 'WARN');
+  }
 
-      // Handle transient server errors (5xx) or back-off sleep rules
-      if ((status === 429 || status >= 500) && i < 2) {
-        const delay = i === 1 ? 35000 : 60000;
-        log(`LLM request failed (${status}), cooling down for ${delay/1000}s before final attempt...`, 'WARN');
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        throw err;
-      }
+  // Try fallback LLM
+  if (fallbackKey) {
+    try {
+      log(`Calling ${fallbackName} (fallback)...`);
+      return await fallback(prompt);
+    } catch (err) {
+      log(`Fallback ${fallbackName} failed: ${err.response?.status || err.message}`, 'WARN');
     }
   }
+
+  // All LLMs failed — use local rules
+  log('All LLM providers failed — falling back to local rule-based decision', 'WARN');
+  return localDecision(forecast, soc, averages, rates, batteryCapacity, history);
 }
 
 async function callOpenAI(prompt) {
@@ -400,9 +476,7 @@ async function analyzeAndDecide() {
       log(`Rates: cheap=${rates.cheapImport.toFixed(1)}p, peak_export=${rates.peakExport.toFixed(1)}p`);
     }
 
-    const prompt = buildPrompt(forecast, soc, averages, rates, BATTERY_CAPACITY_KWH, history);
-    log(`Calling ${LLM_PROVIDER.toUpperCase()} via callLLM wrapper matrix...`);
-    const decision = await callLLM(prompt);
+    const decision = await callProvider(forecast, soc, averages, rates, BATTERY_CAPACITY_KWH, history);
 
     log(`Decision: ${decision.action}${decision.target_soc ? ' (target=' + decision.target_soc + '%)' : ''} [${decision.confidence}]`);
     log(`Reasoning: ${decision.reasoning}`);
@@ -424,8 +498,8 @@ async function analyzeAndDecide() {
         import_rate_cheap_pence, export_rate_peak_pence,
         avg_peak_export_kwh, avg_peak_earnings_pence,
         avg_night_import_kwh, avg_night_cost_pence, system_efficiency_pct,
-        reasoning, model, prompt_tokens, completion_tokens
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        reasoning, model, prompt_tokens, completion_tokens, provider
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
       ON CONFLICT (decision_date) DO UPDATE SET
         action = EXCLUDED.action,
         target_soc = EXCLUDED.target_soc,
@@ -434,6 +508,7 @@ async function analyzeAndDecide() {
         battery_soc = EXCLUDED.battery_soc,
         reasoning = EXCLUDED.reasoning,
         model = EXCLUDED.model,
+        provider = EXCLUDED.provider,
         created_at = NOW()
     `, [
       decisionDate, decision.action, decision.target_soc || null, decision.confidence || 'medium',
@@ -442,6 +517,7 @@ async function analyzeAndDecide() {
       history?.avgPeakExportKwh || null, history?.avgPeakEarningsPence || null,
       history?.avgNightImportKwh || null, history?.avgNightCostPence || null, history?.systemEfficiency || null,
       decision.reasoning, decision.model, decision.promptTokens, decision.completionTokens,
+      decision.model === 'local-rules' ? 'local' : LLM_PROVIDER,
     ]);
 
     if (forecast?.forecastSeries?.length > 0) {

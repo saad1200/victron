@@ -397,6 +397,7 @@ function setESSMode(mode) {
   const names = { 1: 'Optimize+BatteryLife', 9: 'Keep Charged', 10: 'Optimize-BatteryLife' };
   log(`ESS mode: ${currentESSMode} → ${mode} (${names[mode] || 'unknown'})`);
   mqttPublish(MQTT_TOPICS.ESS_MODE_WRITE, mode);
+  currentESSMode = mode;
 }
 
 function setInverterMode(mode) {
@@ -404,6 +405,7 @@ function setInverterMode(mode) {
   const names = { 1: 'Charger Only', 2: 'Inverter Only', 3: 'ON', 4: 'OFF' };
   log(`Inverter mode: ${currentInverterMode} → ${mode} (${names[mode] || 'unknown'})`);
   mqttPublish(MQTT_TOPICS.INVERTER_MODE_WRITE, mode);
+  currentInverterMode = mode;
 }
 
 function setGridSetpoint(watts) {

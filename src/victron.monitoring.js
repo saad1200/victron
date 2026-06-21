@@ -11,11 +11,11 @@ require('dotenv').config();
 
 // Database configuration
 const DB_CONFIG = {
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || 'victron',
+  password: process.env.DB_PASSWORD || 'password',
+  port: process.env.DB_PORT || 5433,
 };
 
 const LOG_FILE = path.join(__dirname, "../logs/victron-monitoring.log");
@@ -219,7 +219,7 @@ async function getCurrentTariffPeriod() {
     const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
     
     const query = `
-      SELECT 
+      SELECT DISTINCT ON (period_name)
         period_name,
         import_rate_pence,
         export_rate_pence,
@@ -228,16 +228,11 @@ async function getCurrentTariffPeriod() {
       FROM victron_tariff_periods
       WHERE is_active = true 
         AND (
-          (start_time <= end_time AND $1 >= start_time AND $1 <= end_time)
+          (start_time < end_time AND $1::time >= start_time AND $1::time < end_time)
           OR
-          (start_time > end_time AND ($1 >= start_time OR $1 <= end_time))
+          (start_time > end_time AND ($1::time >= start_time OR $1::time < end_time))
         )
-      ORDER BY 
-        CASE 
-          WHEN start_time > end_time THEN 1 
-          ELSE 0 
-        END,
-        start_time
+      ORDER BY period_name, updated_at DESC NULLS LAST
       LIMIT 1
     `;
     

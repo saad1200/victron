@@ -56,6 +56,7 @@ ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_peak_earning
 ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_night_import_kwh DECIMAL(8,2);
 ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS avg_night_cost_pence DECIMAL(10,2);
 ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS system_efficiency_pct DECIMAL(5,2);
+ALTER TABLE victron_strategy_decisions ADD COLUMN IF NOT EXISTS provider VARCHAR(20);
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Views
