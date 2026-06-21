@@ -230,18 +230,18 @@ Respond with ONLY valid JSON:
 
 // ─────────────────────────── Local Rule-Based Provider ───────────────
 //
-// Decision thresholds (assuming avgConsumption=15 kWh, peakNeed=14 kWh):
+// Decision thresholds (assuming avgConsumption=17 kWh, peakNeed=12 kWh):
 //
 //  Forecast  Surplus  Decision
 //  ────────  ───────  ──────────────────────────────────
-//  48 kWh    31 kWh   skip_night_charge  (surplus ≥ 14.5)
-//  32 kWh    15 kWh   skip_night_charge  (surplus ≥ 14.5)
-//  27 kWh    10 kWh   partial_charge     (surplus ≥ 4.4)
-//  21 kWh     4 kWh   partial_charge     (surplus ≥ 4.4)
-//  20 kWh     3 kWh   full_charge        (surplus < 4.4)
-//   5 kWh     0 kWh   full_charge        (surplus < 4.4)
+//  48 kWh    31 kWh   skip_night_charge  (surplus ≥ 12)
+//  29 kWh    12 kWh   skip_night_charge  (surplus ≥ 12)
+//  24 kWh     7 kWh   partial_charge     (surplus ≥ 3.6)
+//  21 kWh     4 kWh   partial_charge     (surplus ≥ 3.6)
+//  20 kWh     3 kWh   full_charge        (surplus < 3.6)
+//   5 kWh     0 kWh   full_charge        (surplus < 3.6)
 //
-// peakNeed = avgPeakExport (default 11.5 kWh) + peakHouseConsumption (3 kWh)
+// peakNeed = total inverter output during peak (default 12 kWh, includes export + house load)
 // surplus  = max(0, forecast - avgConsumption)
 // skip:      surplus >= peakNeed
 // partial:   surplus >= peakNeed * 0.3
@@ -253,12 +253,9 @@ function localDecision(forecast, soc, averages, rates, batteryCapacity, history)
   const cheapRate = rates?.cheapImport || 15.5;
   const peakExportRate = rates?.peakExport || 29.8;
 
-  // Actual peak export from history, or default 11.5 kWh (inverter max over 3h peak)
-  const peakExportKwh = history?.avgPeakExportKwh || 11.5;
-  // House consumption during peak hours (~1 kWh/hr × 3 hours)
-  const peakHouseKwh = 3;
-  // Total energy the battery needs for peak = export + house during peak
-  const energyNeededForPeak = peakExportKwh + peakHouseKwh;
+  // Total inverter output during peak (export + house load combined, ~4kW × 3h)
+  const peakTotalKwh = history?.avgPeakExportKwh || 12;
+  const energyNeededForPeak = peakTotalKwh;
 
   // Solar surplus available to charge battery (after covering daytime consumption)
   const solarSurplus = Math.max(0, tomorrowKwh - avgConsumption);
@@ -272,7 +269,7 @@ function localDecision(forecast, soc, averages, rates, batteryCapacity, history)
       action: 'skip_night_charge',
       target_soc: null,
       confidence: solarSurplus >= energyNeededForPeak * 1.3 ? 'high' : 'medium',
-      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus after ${avgConsumption.toFixed(1)} kWh consumption — covers ${energyNeededForPeak.toFixed(0)} kWh needed for peak export (${peakExportKwh.toFixed(0)} kWh export + ${peakHouseKwh} kWh house).`,
+      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus after ${avgConsumption.toFixed(1)} kWh consumption — covers ${energyNeededForPeak.toFixed(1)} kWh needed for peak (inverter output: export + house load).`,
     };
   }
 
@@ -285,7 +282,7 @@ function localDecision(forecast, soc, averages, rates, batteryCapacity, history)
       action: 'partial_charge',
       target_soc: targetSoc,
       confidence: 'medium',
-      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus — covers ${Math.round(solarSurplus / energyNeededForPeak * 100)}% of ${energyNeededForPeak.toFixed(0)} kWh peak need. Charging to ${targetSoc}% to top up remaining ${gridTopUpKwh.toFixed(1)} kWh from grid at ${cheapRate.toFixed(1)}p.`,
+      reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh with ${solarSurplus.toFixed(1)} kWh surplus — covers ${Math.round(solarSurplus / energyNeededForPeak * 100)}% of ${energyNeededForPeak.toFixed(1)} kWh peak need. Charging to ${targetSoc}% to top up remaining ${gridTopUpKwh.toFixed(1)} kWh from grid at ${cheapRate.toFixed(1)}p.`,
     };
   }
 
@@ -295,7 +292,7 @@ function localDecision(forecast, soc, averages, rates, batteryCapacity, history)
     action: 'full_charge',
     target_soc: 100,
     confidence: solarSurplus < 2 ? 'high' : 'medium',
-    reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh insufficient (surplus ${solarSurplus.toFixed(1)} kWh after ${avgConsumption.toFixed(1)} kWh consumption vs ${energyNeededForPeak.toFixed(0)} kWh peak need). Full charge at ${cheapRate.toFixed(1)}p to export at ${peakExportRate.toFixed(1)}p during peak.`,
+    reasoning: `[LOCAL] Solar forecast ${tomorrowKwh.toFixed(1)} kWh insufficient (surplus ${solarSurplus.toFixed(1)} kWh after ${avgConsumption.toFixed(1)} kWh consumption vs ${energyNeededForPeak.toFixed(1)} kWh peak need). Full charge at ${cheapRate.toFixed(1)}p to export at ${peakExportRate.toFixed(1)}p during peak.`,
   };
 }
 
