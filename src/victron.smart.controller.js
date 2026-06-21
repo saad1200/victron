@@ -59,7 +59,7 @@ const CONFIG = {
   // Grid voltage for power ↔ current conversion (single phase)
   GRID_VOLTAGE: parseInt(process.env.GRID_VOLTAGE) || 230,
   // Max battery charge rate from grid (W)
-  MAX_GRID_CHARGE_WATTS: parseInt(process.env.MAX_GRID_CHARGE_WATTS) || 3000,
+  MAX_GRID_CHARGE_WATTS: parseInt(process.env.MAX_GRID_CHARGE_WATTS) || 12000,
   // Max battery discharge/export rate (W, as positive number)
   MAX_EXPORT_WATTS: parseInt(process.env.MAX_EXPORT_WATTS) || 12000,
   // Strategy loop interval (ms)
@@ -646,9 +646,9 @@ function normalSolarStrategy() {
     setGridSetpoint(CONFIG.MAX_GRID_CHARGE_WATTS);
     strategy = 'normal_emergency_charge';
   } else if (currentSOC >= CONFIG.FULL_SOC_THRESHOLD) {
-    // Battery nearly full — allow export of excess solar
-    setGridSetpoint(0);
-    strategy = 'normal_battery_full_allow_export';
+    // Battery full — hold for peak export, do not export now
+    setGridSetpoint(CONFIG.IMPORT_BIAS_WATTS);
+    strategy = 'normal_battery_full_hold_for_peak';
   } else {
     // Slight import bias to prevent export, battery absorbs solar surplus
     setGridSetpoint(CONFIG.IMPORT_BIAS_WATTS);
@@ -690,17 +690,10 @@ function expensiveRateStrategy() {
   setInverterMode(INVERTER_MODES.ON);
   setMinSOC(CONFIG.PEAK_MIN_SOC);
 
-  if (currentSOC > CONFIG.PEAK_MIN_SOC + 5) {
-    // Battery has charge — export aggressively
-    setESSMode(ESS_MODES.OPTIMIZE_WITHOUT_BATTERYLIFE);
-    setGridSetpoint(-CONFIG.MAX_EXPORT_WATTS);
-    strategy = 'expensive_max_export';
-  } else {
-    // Battery low — switch to self-consumption only
-    setESSMode(ESS_MODES.OPTIMIZE_WITH_BATTERYLIFE);
-    setGridSetpoint(0);
-    strategy = 'expensive_low_soc_preserve';
-  }
+  // Always export at max during peak — MinSOC protects the battery
+  setESSMode(ESS_MODES.OPTIMIZE_WITHOUT_BATTERYLIFE);
+  setGridSetpoint(-CONFIG.MAX_EXPORT_WATTS);
+  strategy = 'expensive_max_export';
 
   // EV: NEVER charge from grid during peak (expensive!)
   if (evIsConnected() && evIsCharging()) {
@@ -731,9 +724,8 @@ function normalNoSolarStrategy() {
   setGridSetpoint(CONFIG.IMPORT_BIAS_WATTS);
 
   if (currentSOC <= CONFIG.EVENING_MIN_SOC) {
-    // Battery critical — import from grid for essentials
-    setGridSetpoint(Math.round(loadPower + CONFIG.IMPORT_BIAS_WATTS));
-    strategy = 'evening_low_soc_import';
+    // Battery critical — keep import bias, ESS BatteryLife will handle grid import
+    strategy = 'evening_low_soc';
   }
 
   // EV: charge at low rate if battery is healthy
